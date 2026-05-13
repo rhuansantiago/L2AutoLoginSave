@@ -28,6 +28,7 @@
 #include "backends/imgui_impl_win32.h"
 #include "MinHook.h"
 #include "overlay_ui.h"
+#include "client_profiles.h"
 
 #pragma comment(lib, "d3d9.lib")
 
@@ -109,15 +110,10 @@ static int FirstEmptySlot() {
 //       popup. Hooking it gives us a reliable "leaving login screen" event,
 //       since after this fires the client transitions to char-select.
 // -----------------------------------------------------------------------------
-constexpr uintptr_t kRvaAuthLogin                 = 0x8770e0;
-constexpr uintptr_t kRvaExecGotoServerList        = 0x9da470;  // never fires; UScript path unused
-constexpr uintptr_t kRvaExecGotoLogin             = 0x9da350;
-constexpr uintptr_t kRvaExecRequestLoginServer    = 0x9eded0;
-// The internal GotoServerList — what execGotoServerList actually calls, but
-// more importantly what the C++ auth packet handler calls when the server
-// pushes the server list. Zero-arg cdecl/stdcall. Found by disassembling
-// execGotoServerList: its only meaningful CALL is to this address.
-constexpr uintptr_t kRvaGotoServerListInternal    = 0x847f20;
+// Per-client RVA table lives in client_profiles.h. Detected at hook install
+// time by reading NWindow.dll's PE TimeDateStamp; gives us multi-build
+// support without recompiling per client.
+const ClientProfile* g_profile = nullptr;
 
 // AuthLogin is __stdcall (its epilogue ends with `ret 0xC`, callee cleans
 // the 12-byte arg block). Wrong calling convention was silently corrupting
@@ -131,17 +127,31 @@ volatile bool g_inOurAuthLogin = false;   // suppress auto-capture when WE call
 using PFN_ExecThiscall = void (__thiscall*)(void* This, void* FFrame, void* result);
 PFN_ExecThiscall g_origExecGotoLogin          = nullptr;
 PFN_ExecThiscall g_origExecRequestLoginServer = nullptr;
+PFN_ExecThiscall g_origExecShowWindowGFx      = nullptr;
 
-// Zero-arg internal — calling convention is irrelevant for an empty arg list.
-using PFN_VoidVoid = void (__cdecl*)();
-PFN_VoidVoid g_origGotoServerListInternal = nullptr;
+// State: between AuthLogin success and the next state transition (login
+// completes OR returns to login), every UGFxUIScript::ShowWindow call is
+// logged with this-byte-dump so we can identify which UScript object/class
+// is the server-list popup.
+volatile bool g_loginInProgress = false;
 
 bool ResolveNativeLogin() {
     if (g_pAuthLogin) return true;
     HMODULE hNW = GetModuleHandleW(L"NWindow.dll");
     if (!hNW) { Logf("LoginNative: NWindow.dll not loaded yet"); return false; }
-    g_pAuthLogin = (PFN_AuthLogin)((uintptr_t)hNW + kRvaAuthLogin);
-    Logf("LoginNative: AuthLogin=%p  (NWindow base=%p)", g_pAuthLogin, hNW);
+    if (!g_profile) {
+        uint32_t ts = GetModulePeTimestamp(hNW);
+        g_profile = FindClientProfile(ts);
+        if (!g_profile) {
+            Logf("LoginNative: UNKNOWN NWindow build (TimeDateStamp=0x%08x) — no profile match", ts);
+            return false;
+        }
+        Logf("LoginNative: matched client profile '%s' (ts=0x%08x)",
+             g_profile->label, ts);
+    }
+    g_pAuthLogin = (PFN_AuthLogin)((uintptr_t)hNW + g_profile->rvaAuthLoginInternal);
+    Logf("LoginNative: AuthLogin=%p  (NWindow base=%p + rva=0x%lx)",
+         g_pAuthLogin, hNW, (unsigned long)g_profile->rvaAuthLoginInternal);
     return true;
 }
 
@@ -223,6 +233,12 @@ bool LoginNative(const std::wstring& user, const std::wstring& pass) {
         return false;
     }
     Logf("LoginNative: AuthLogin returned %d for user='%ls'", rc, user.c_str());
+    if (rc != 0) {
+        // Arm ShowWindow probing — every subsequent UGFxUIScript::ShowWindow
+        // call gets dumped until we identify the server-list popup or some
+        // terminal state transition fires (HookGotoLogin / HookRequestLoginServer).
+        g_loginInProgress = true;
+    }
     return rc != 0;
 }
 
@@ -549,31 +565,79 @@ void InitImGuiIfNeeded(IDirect3DDevice9* dev) {
 void __fastcall HookExecGotoLogin(void* This, void* /*edx*/, void* FFrame, void* result) {
     Logf("HookGotoLogin fired — back to login → show overlay");
     g_overlayShow = true;
+    g_loginInProgress = false;
     g_origExecGotoLogin(This, FFrame, result);
 }
 void __fastcall HookExecRequestLoginServer(void* This, void* /*edx*/, void* FFrame, void* result) {
     Logf("HookRequestLoginServer fired — user picked a server → hide overlay");
     g_overlayShow = false;
+    g_loginInProgress = false;
     g_origExecRequestLoginServer(This, FFrame, result);
 }
 
-// The actual C++ function that opens the server-list popup. Gets called by
-// the auth response packet handler when the server pushes its server list,
-// so this is the real "login confirmed → leaving login screen" signal.
-void __cdecl HookGotoServerListInternal() {
-    Logf("HookGotoServerListInternal fired — server-list popup opens → hide overlay");
-    g_overlayShow = false;
-    g_origGotoServerListInternal();
+// SEH-safe DWORD probe.
+static unsigned int SafeReadU32(const void* p) {
+    __try { return *(const volatile unsigned int*)p; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return 0xDEADBEEFu; }
+}
+
+// UGFxUIScript::ShowWindow — fires for every Flash-driven UI window, every
+// time it's shown. While a login is in progress (post-AuthLogin, pre-final
+// transition), dump `this`+16 DWORDs and the NCLobbyWnd UClass* so we can
+// identify which slot in the UObject layout holds Class. When `this->Class
+// == NCLobbyWnd`, we know the server-list popup is opening → hide.
+void __fastcall HookExecShowWindowGFx(void* This, void* /*edx*/, void* FFrame, void* result) {
+    if (g_loginInProgress && This && g_profile) {
+        HMODULE hNW = GetModuleHandleW(L"NWindow.dll");
+        void* ncLobby = nullptr;
+        if (hNW) {
+            ncLobby = (void*)SafeReadU32((char*)hNW + g_profile->rvaAutoclassNCLobbyWnd);
+        }
+        unsigned int dw[16] = {};
+        for (int i = 0; i < 16; ++i) {
+            dw[i] = SafeReadU32((char*)This + i * 4);
+        }
+        // Look for any DWORD slot matching the NCLobbyWnd UClass pointer.
+        int matchOffset = -1;
+        for (int i = 0; i < 16; ++i) {
+            if (dw[i] == (unsigned int)(uintptr_t)ncLobby && ncLobby != nullptr) {
+                matchOffset = i * 4; break;
+            }
+        }
+        Logf("ShowWindow this=%p NCLobby=%p match@+0x%x  dw[0..7]=%08x %08x %08x %08x %08x %08x %08x %08x",
+             This, ncLobby, matchOffset,
+             dw[0], dw[1], dw[2], dw[3], dw[4], dw[5], dw[6], dw[7]);
+        Logf("                     dw[8..15]=%08x %08x %08x %08x %08x %08x %08x %08x",
+             dw[8], dw[9], dw[10], dw[11], dw[12], dw[13], dw[14], dw[15]);
+        if (matchOffset >= 0) {
+            Logf("  → NCLobbyWnd class match → hide overlay");
+            g_overlayShow = false;
+            g_loginInProgress = false;
+        }
+    }
+    g_origExecShowWindowGFx(This, FFrame, result);
 }
 
 // NWindow.dll isn't loaded when InstallWorker runs — install lazily from
-// RenderFrame instead. Idempotent: latches once all hooks are in.
+// RenderFrame instead. Idempotent: latches once all hooks are in. Uses
+// the runtime-detected client profile to look up per-build RVAs.
 static void EnsureNWindowHooks() {
     static bool s_done = false;
     if (s_done) return;
 
     HMODULE hNW = GetModuleHandleW(L"NWindow.dll");
     if (!hNW) return;
+    if (!g_profile) {
+        uint32_t ts = GetModulePeTimestamp(hNW);
+        g_profile = FindClientProfile(ts);
+        if (!g_profile) {
+            Logf("EnsureNWindowHooks: UNKNOWN build TimeDateStamp=0x%08x — overlay UI only, no native hooks", ts);
+            s_done = true;  // give up; don't retry forever
+            return;
+        }
+        Logf("EnsureNWindowHooks: matched profile '%s' (ts=0x%08x)",
+             g_profile->label, ts);
+    }
     uintptr_t base = (uintptr_t)hNW;
 
     auto installOne = [base](uintptr_t rva, void* detour, void** ppOrig, const char* name) {
@@ -585,14 +649,14 @@ static void EnsureNWindowHooks() {
         Logf("MH hook installed (lazy): %s @ %p (trampoline=%p)", name, tgt, *ppOrig);
     };
 
-    installOne(kRvaExecGotoLogin,           (void*)&HookExecGotoLogin,
-               (void**)&g_origExecGotoLogin,           "NWindow!execGotoLogin");
-    installOne(kRvaExecRequestLoginServer,  (void*)&HookExecRequestLoginServer,
-               (void**)&g_origExecRequestLoginServer,  "NWindow!execRequestLoginServer");
-    installOne(kRvaGotoServerListInternal,  (void*)&HookGotoServerListInternal,
-               (void**)&g_origGotoServerListInternal,  "NWindow!GotoServerListInternal");
-    installOne(kRvaAuthLogin,               (void*)&HookAuthLogin,
-               (void**)&g_origAuthLogin,               "NWindow!AuthLogin");
+    installOne(g_profile->rvaExecGotoLogin,          (void*)&HookExecGotoLogin,
+               (void**)&g_origExecGotoLogin,          "NWindow!execGotoLogin");
+    installOne(g_profile->rvaExecRequestLoginServer, (void*)&HookExecRequestLoginServer,
+               (void**)&g_origExecRequestLoginServer, "NWindow!execRequestLoginServer");
+    installOne(g_profile->rvaExecShowWindowGFx,      (void*)&HookExecShowWindowGFx,
+               (void**)&g_origExecShowWindowGFx,      "NWindow!UGFxUIScript::ShowWindow");
+    installOne(g_profile->rvaAuthLoginInternal,      (void*)&HookAuthLogin,
+               (void**)&g_origAuthLogin,              "NWindow!AuthLogin");
     s_done = true;
 }
 
