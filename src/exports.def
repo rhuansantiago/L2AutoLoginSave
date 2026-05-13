@@ -1,0 +1,8 @@
+; L2.exe imports DSETUP.dll by ORDINAL only (ordinal 11), not by name.
+; This .def file forces our exported function to land at ordinal 11
+; so Windows loader's name-lookup-by-ordinal succeeds.
+;
+; Don't add LIBRARY here — CMake/MSVC sets the output name. If LIBRARY is
+; set the linker may complain about mismatched names.
+EXPORTS
+    DirectXSetupGetVersion @11
