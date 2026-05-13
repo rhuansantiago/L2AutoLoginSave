@@ -111,23 +111,42 @@ static int FirstEmptySlot() {
 //       since after this fires the client transitions to char-select.
 // -----------------------------------------------------------------------------
 // Per-client RVA table lives in client_profiles.h. Detected at hook install
-// time by reading NWindow.dll's PE TimeDateStamp; gives us multi-build
-// support without recompiling per client.
+// time by hashing the probe module's PE TimeDateStamp.
 const ClientProfile* g_profile = nullptr;
 
+// --------------------------- Essence family ----------------------------------
 // AuthLogin is __stdcall (its epilogue ends with `ret 0xC`, callee cleans
-// the 12-byte arg block). Wrong calling convention was silently corrupting
-// the caller's stack frame — locals downstream of the call read garbage.
-using PFN_AuthLogin = int (__stdcall*)(wchar_t* user, wchar_t* pass, int otp);
-PFN_AuthLogin g_pAuthLogin    = nullptr;  // raw entry pointer
-PFN_AuthLogin g_origAuthLogin = nullptr;  // MinHook trampoline (real impl)
-volatile bool g_inOurAuthLogin = false;   // suppress auto-capture when WE call
+// the 12-byte arg block).
+using PFN_AuthLoginStdcall = int (__stdcall*)(wchar_t* user, wchar_t* pass, int otp);
+PFN_AuthLoginStdcall g_pAuthLogin    = nullptr;  // raw entry pointer
+PFN_AuthLoginStdcall g_origAuthLogin = nullptr;  // MinHook trampoline (real impl)
+volatile bool g_inOurAuthLogin = false;          // suppress auto-capture when WE call
 
 // __thiscall trampoline shared across all the UScript-native hooks below.
 using PFN_ExecThiscall = void (__thiscall*)(void* This, void* FFrame, void* result);
 PFN_ExecThiscall g_origExecGotoLogin          = nullptr;
 PFN_ExecThiscall g_origExecRequestLoginServer = nullptr;
 PFN_ExecThiscall g_origExecShowWindowGFx      = nullptr;
+
+// --------------------------- Interlude family --------------------------------
+// All Interlude hooks are __thiscall on member functions (this in ECX).
+// We use the __fastcall trick (ECX=this, EDX=junk) for both detours and the
+// outgoing call from LoginNative. The trampoline gets stored back into a
+// typedef'd pointer so we can re-enter the original with the right ABI.
+using PFN_UNH_AuthLogin    = int  (__fastcall*)(void* This, void* /*edx*/, wchar_t* user, wchar_t* pass, int otp);
+using PFN_UNH_Init         = void (__fastcall*)(void* This, void* /*edx*/, int n, void* gameEngine);
+using PFN_UNH_ServerLogin  = int  (__fastcall*)(void* This, void* /*edx*/, void* l2ParamStack);
+using PFN_UGE_SrvSelOK     = int  (__fastcall*)(void* This, void* /*edx*/);
+using PFN_UGE_SrvSelFail   = int  (__fastcall*)(void* This, void* /*edx*/, int code);
+using PFN_UNH_IsNotYetLogin= bool (__fastcall*)(void* This, void* /*edx*/);
+
+PFN_UNH_AuthLogin     g_origUNHAuthLogin     = nullptr;
+PFN_UNH_Init          g_origUNHInit          = nullptr;
+PFN_UNH_ServerLogin   g_origUNHServerLogin   = nullptr;
+PFN_UGE_SrvSelOK      g_origUGEAuthSrvOK     = nullptr;
+PFN_UGE_SrvSelFail    g_origUGEAuthSrvFail   = nullptr;
+PFN_UNH_IsNotYetLogin g_pUNHIsNotYetLogin    = nullptr;
+void*                 g_uNetworkHandler      = nullptr;  // captured singleton this
 
 // State: between AuthLogin success and the next state transition (login
 // completes OR returns to login), every UGFxUIScript::ShowWindow call is
@@ -146,30 +165,48 @@ void* g_preAuthWnd[kMaxPreAuthWnds] = {};
 int   g_preAuthCount = 0;
 volatile bool g_authLoginSeen = false;
 
-bool ResolveNativeLogin() {
-    if (g_pAuthLogin) return true;
-    HMODULE hNW = GetModuleHandleW(L"NWindow.dll");
-    if (!hNW) { Logf("LoginNative: NWindow.dll not loaded yet"); return false; }
+bool ResolveProfileAndModule() {
+    if (g_profile) return true;
+    g_profile = FindClientProfile();
     if (!g_profile) {
-        uint32_t ts = GetModulePeTimestamp(hNW);
-        g_profile = FindClientProfile(ts);
-        if (!g_profile) {
-            Logf("LoginNative: UNKNOWN NWindow build (TimeDateStamp=0x%08x) — no profile match", ts);
-            return false;
-        }
-        Logf("LoginNative: matched client profile '%s' (ts=0x%08x)",
-             g_profile->label, ts);
+        // No probe module loaded with a matching timestamp yet.
+        return false;
     }
-    g_pAuthLogin = (PFN_AuthLogin)((uintptr_t)hNW + g_profile->rvaAuthLoginInternal);
-    Logf("LoginNative: AuthLogin=%p  (NWindow base=%p + rva=0x%lx)",
-         g_pAuthLogin, hNW, (unsigned long)g_profile->rvaAuthLoginInternal);
+    Logf("Profile matched: '%s' (family=%s, probe=%ls)",
+         g_profile->label,
+         g_profile->family == kFamilyEssence ? "Essence" : "Interlude",
+         g_profile->probeModule);
+    return true;
+}
+
+bool ResolveNativeLogin() {
+    if (!ResolveProfileAndModule()) return false;
+    HMODULE hMod = GetModuleHandleW(g_profile->probeModule);
+    if (!hMod) return false;
+
+    if (g_profile->family == kFamilyEssence) {
+        if (g_pAuthLogin) return true;
+        g_pAuthLogin = (PFN_AuthLoginStdcall)((uintptr_t)hMod + g_profile->rvaAuthLoginInternal);
+        Logf("LoginNative: AuthLogin=%p  (NWindow base=%p + rva=0x%lx)",
+             g_pAuthLogin, hMod, (unsigned long)g_profile->rvaAuthLoginInternal);
+        return true;
+    }
+    // Interlude — already resolved (function pointer is per-call from profile)
     return true;
 }
 
 // SEH wrappers must live in functions with no C++ objects requiring unwind
 // (otherwise: error C2712). Sentinel -1 on exception.
-static int SafeAuthLoginCall(PFN_AuthLogin fn, wchar_t* u, wchar_t* p, int otp) {
+static int SafeAuthLoginCall(PFN_AuthLoginStdcall fn, wchar_t* u, wchar_t* p, int otp) {
     __try { return fn(u, p, otp); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+static int SafeUNHAuthLoginCall(PFN_UNH_AuthLogin fn, void* This, wchar_t* u, wchar_t* p, int otp) {
+    __try { return fn(This, nullptr, u, p, otp); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+static int SafeUNHIsNotYetLogin(PFN_UNH_IsNotYetLogin fn, void* This) {
+    __try { return fn(This, nullptr) ? 1 : 0; }
     __except(EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
 static int SafeMeasureWideLen(const wchar_t* p, int maxLen) {
@@ -236,15 +273,35 @@ int __stdcall HookAuthLogin(wchar_t* user, wchar_t* pass, int otp) {
 bool LoginNative(const std::wstring& user, const std::wstring& pass) {
     if (!ResolveNativeLogin()) return false;
     std::wstring u = user, p = pass;
-    // Prefer the trampoline (bypasses our hook entirely) so we don't have
-    // to round-trip through HookAuthLogin. If the hook hasn't been
-    // installed yet (NWindow loaded but EnsureNWindowHooks not run), fall
-    // back to the raw entry — HookAuthLogin will see g_inOurAuthLogin and
-    // suppress capture either way.
-    PFN_AuthLogin fn = g_origAuthLogin ? g_origAuthLogin : g_pAuthLogin;
     g_inOurAuthLogin = true;
-    g_authLoginSeen  = true;  // unlock pre-auth re-show detection
-    int rc = SafeAuthLoginCall(fn, u.data(), p.data(), /*otp*/ 0);
+    g_authLoginSeen  = true;
+
+    int rc = 0;
+    if (g_profile->family == kFamilyEssence) {
+        // Stdcall internal AuthLogin via trampoline (bypass our own hook).
+        PFN_AuthLoginStdcall fn = g_origAuthLogin ? g_origAuthLogin : g_pAuthLogin;
+        rc = SafeAuthLoginCall(fn, u.data(), p.data(), /*otp*/ 0);
+    } else {
+        // Interlude — __thiscall on captured UNetworkHandler singleton.
+        if (!g_uNetworkHandler) {
+            g_inOurAuthLogin = false;
+            Logf("LoginNative: UNetworkHandler singleton not captured yet — "
+                 "log in once via the native L2 form first to populate it");
+            return false;
+        }
+        HMODULE hEng = GetModuleHandleW(g_profile->probeModule);
+        PFN_UNH_AuthLogin fn = g_origUNHAuthLogin;
+        if (!fn && hEng) {
+            fn = (PFN_UNH_AuthLogin)((uintptr_t)hEng + g_profile->rvaUNHRequestAuthLogin);
+        }
+        if (!fn) {
+            g_inOurAuthLogin = false;
+            Logf("LoginNative: no UNH RequestAuthLogin pointer available");
+            return false;
+        }
+        rc = SafeUNHAuthLoginCall(fn, g_uNetworkHandler, u.data(), p.data(), /*otp*/ 0);
+    }
+
     g_inOurAuthLogin = false;
     if (rc == -1) {
         Logf("LoginNative: AuthLogin threw SEH exception");
@@ -711,52 +768,98 @@ void __fastcall HookExecShowWindowGFx(void* This, void* /*edx*/, void* FFrame, v
     g_origExecShowWindowGFx(This, FFrame, result);
 }
 
-// NWindow.dll isn't loaded when InstallWorker runs — install lazily from
-// RenderFrame instead. Idempotent: latches once all hooks are in. Uses
-// the runtime-detected client profile to look up per-build RVAs.
-static void EnsureNWindowHooks() {
+// ============================================================================
+// Interlude hook detours
+// ============================================================================
+void __fastcall HookUNHInit(void* This, void* /*edx*/, int n, void* gameEngine) {
+    g_uNetworkHandler = This;
+    Logf("HookUNHInit fired — UNetworkHandler singleton @ %p", This);
+    g_origUNHInit(This, nullptr, n, gameEngine);
+}
+int __fastcall HookUNHAuthLogin(void* This, void* /*edx*/, wchar_t* user, wchar_t* pass, int otp) {
+    g_authLoginSeen = true;
+    if (!g_uNetworkHandler) {
+        g_uNetworkHandler = This;
+        Logf("HookUNHAuthLogin: captured singleton late @ %p", This);
+    }
+    if (!g_inOurAuthLogin) {
+        AutoCaptureLogin(user, pass);
+        Logf("HookUNHAuthLogin (game-initiated) — forcing overlay visible");
+        g_overlayShow = true;
+    }
+    return g_origUNHAuthLogin(This, nullptr, user, pass, otp);
+}
+int __fastcall HookUNHServerLogin(void* This, void* /*edx*/, void* paramStack) {
+    Logf("HookUNHServerLogin — user picked server → hide overlay");
+    g_overlayShow = false;
+    return g_origUNHServerLogin(This, nullptr, paramStack);
+}
+int __fastcall HookUGEAuthSrvOK(void* This, void* /*edx*/) {
+    Logf("HookUGEAuthSrvOK — login confirmed → hide overlay");
+    g_overlayShow = false;
+    return g_origUGEAuthSrvOK(This, nullptr);
+}
+int __fastcall HookUGEAuthSrvFail(void* This, void* /*edx*/, int code) {
+    Logf("HookUGEAuthSrvFail (code=%d) → show overlay", code);
+    g_overlayShow = true;
+    return g_origUGEAuthSrvFail(This, nullptr, code);
+}
+
+// ============================================================================
+// Hook installation — dispatches by profile family
+// ============================================================================
+static void EnsureClientHooks() {
     static bool s_done = false;
     if (s_done) return;
+    if (!ResolveProfileAndModule()) return;
 
-    HMODULE hNW = GetModuleHandleW(L"NWindow.dll");
-    if (!hNW) return;
-    if (!g_profile) {
-        uint32_t ts = GetModulePeTimestamp(hNW);
-        g_profile = FindClientProfile(ts);
-        if (!g_profile) {
-            Logf("EnsureNWindowHooks: UNKNOWN build TimeDateStamp=0x%08x — overlay UI only, no native hooks", ts);
-            s_done = true;  // give up; don't retry forever
-            return;
-        }
-        Logf("EnsureNWindowHooks: matched profile '%s' (ts=0x%08x)",
-             g_profile->label, ts);
-    }
-    uintptr_t base = (uintptr_t)hNW;
+    HMODULE hMod = GetModuleHandleW(g_profile->probeModule);
+    if (!hMod) return;
+    uintptr_t base = (uintptr_t)hMod;
 
     auto installOne = [base](uintptr_t rva, void* detour, void** ppOrig, const char* name) {
+        if (!rva) return;
         void* tgt = (void*)(base + rva);
         MH_STATUS cs = MH_CreateHook(tgt, detour, ppOrig);
         if (cs != MH_OK) { Logf("MH_CreateHook(%s) FAILED %d", name, (int)cs); return; }
         MH_STATUS es = MH_EnableHook(tgt);
         if (es != MH_OK) { Logf("MH_EnableHook(%s) FAILED %d", name, (int)es); return; }
-        Logf("MH hook installed (lazy): %s @ %p (trampoline=%p)", name, tgt, *ppOrig);
+        Logf("MH hook installed: %s @ %p (trampoline=%p)", name, tgt, *ppOrig);
     };
 
-    installOne(g_profile->rvaExecGotoLogin,          (void*)&HookExecGotoLogin,
-               (void**)&g_origExecGotoLogin,          "NWindow!execGotoLogin");
-    installOne(g_profile->rvaExecRequestLoginServer, (void*)&HookExecRequestLoginServer,
-               (void**)&g_origExecRequestLoginServer, "NWindow!execRequestLoginServer");
-    installOne(g_profile->rvaExecShowWindowGFx,      (void*)&HookExecShowWindowGFx,
-               (void**)&g_origExecShowWindowGFx,      "NWindow!UGFxUIScript::ShowWindow");
-    installOne(g_profile->rvaAuthLoginInternal,      (void*)&HookAuthLogin,
-               (void**)&g_origAuthLogin,              "NWindow!AuthLogin");
+    if (g_profile->family == kFamilyEssence) {
+        installOne(g_profile->rvaExecGotoLogin,          (void*)&HookExecGotoLogin,
+                   (void**)&g_origExecGotoLogin,          "NWindow!execGotoLogin");
+        installOne(g_profile->rvaExecRequestLoginServer, (void*)&HookExecRequestLoginServer,
+                   (void**)&g_origExecRequestLoginServer, "NWindow!execRequestLoginServer");
+        installOne(g_profile->rvaExecShowWindowGFx,      (void*)&HookExecShowWindowGFx,
+                   (void**)&g_origExecShowWindowGFx,      "NWindow!UGFxUIScript::ShowWindow");
+        installOne(g_profile->rvaAuthLoginInternal,      (void*)&HookAuthLogin,
+                   (void**)&g_origAuthLogin,              "NWindow!AuthLogin");
+    } else {  // Interlude
+        // Stash IsNotYetLogin entry for the polling loop.
+        if (g_profile->rvaUNHIsNotYetLogin) {
+            g_pUNHIsNotYetLogin = (PFN_UNH_IsNotYetLogin)(base + g_profile->rvaUNHIsNotYetLogin);
+            Logf("Interlude IsNotYetLogin entry @ %p", g_pUNHIsNotYetLogin);
+        }
+        installOne(g_profile->rvaUNHInit,               (void*)&HookUNHInit,
+                   (void**)&g_origUNHInit,               "engine!UNH::Init");
+        installOne(g_profile->rvaUNHRequestAuthLogin,   (void*)&HookUNHAuthLogin,
+                   (void**)&g_origUNHAuthLogin,          "engine!UNH::RequestAuthLogin");
+        installOne(g_profile->rvaUNHRequestServerLogin, (void*)&HookUNHServerLogin,
+                   (void**)&g_origUNHServerLogin,        "engine!UNH::RequestServerLogin");
+        installOne(g_profile->rvaUGEAuthSrvSelectOK,    (void*)&HookUGEAuthSrvOK,
+                   (void**)&g_origUGEAuthSrvOK,          "engine!UGE::OnAuthSrvSelectOK");
+        installOne(g_profile->rvaUGEAuthSrvSelectFail,  (void*)&HookUGEAuthSrvFail,
+                   (void**)&g_origUGEAuthSrvFail,        "engine!UGE::OnAuthSrvSelectFail");
+    }
     s_done = true;
 }
 
 void RenderFrame(IDirect3DDevice9* dev) {
     InitImGuiIfNeeded(dev);
     if (!g_imguiReady) return;
-    EnsureNWindowHooks();
+    EnsureClientHooks();
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
