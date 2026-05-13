@@ -13,11 +13,24 @@
 #include <cstdarg>
 #include "overlay_ui.h"
 
-const char* kLogPath = "H:\\L2_Essence_542_SamuraiCrow\\hollow_l2\\overlay.log";
+// Build the log path lazily, once per process: %LOCALAPPDATA%\hollow_l2_overlay\overlay.log
+// Falls back to %TEMP% if LOCALAPPDATA isn't set (shouldn't happen on Windows).
+static const char* GetLogPath() {
+    static char s_path[MAX_PATH] = {0};
+    if (s_path[0]) return s_path;
+    const char* base = getenv("LOCALAPPDATA");
+    if (!base || !*base) base = getenv("TEMP");
+    if (!base || !*base) base = "C:\\";
+    char dir[MAX_PATH];
+    _snprintf(dir, sizeof(dir), "%s\\hollow_l2_overlay", base);
+    CreateDirectoryA(dir, nullptr);  // ok if already exists
+    _snprintf(s_path, sizeof(s_path), "%s\\overlay.log", dir);
+    return s_path;
+}
 
 // Logf is shared with overlay_ui.cpp via extern "C" linkage.
 extern "C" void Logf(const char* fmt, ...) {
-    FILE* f = fopen(kLogPath, "a");
+    FILE* f = fopen(GetLogPath(), "a");
     if (!f) return;
     SYSTEMTIME st;
     GetLocalTime(&st);

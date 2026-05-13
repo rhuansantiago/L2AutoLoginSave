@@ -42,9 +42,10 @@ target_compile_definitions(imgui PRIVATE
 )
 
 # -----------------------------------------------------------------------------
-# l2ui.dll — the DLL injected into L2.exe (via CFF Explorer IAT add or
-# hollow_l2_inject.exe). Phase 2.5: hooks D3D9::EndScene to render an
-# ImGui overlay inside L2's framebuffer.
+# l2ui.dll — loaded into L2.exe via an IAT entry pointing at
+# l2ui.dll!L2UI_Init (use CFF Explorer or `add_import.py` to wire it up).
+# Hooks D3D9::EndScene/Present/Reset and renders an ImGui overlay inside
+# L2's framebuffer.
 # -----------------------------------------------------------------------------
 add_library(l2ui SHARED
     src/dllmain.cpp
@@ -68,19 +69,5 @@ if(MSVC)
     target_compile_options(l2ui PRIVATE /guard:cf- /Zi)
     set_target_properties(l2ui PROPERTIES
         LINK_FLAGS "/GUARD:NO /MAP /DEBUG /OPT:REF /OPT:ICF"
-    )
-endif()
-
-# -----------------------------------------------------------------------------
-# hollow_l2_inject.exe — optional standalone injector (fallback to CFF Explorer)
-# -----------------------------------------------------------------------------
-add_executable(hollow_l2_inject src/inject.cpp)
-target_compile_definitions(hollow_l2_inject PRIVATE
-    WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS
-)
-if(MSVC)
-    target_compile_options(hollow_l2_inject PRIVATE /guard:cf- /Zi)
-    set_target_properties(hollow_l2_inject PROPERTIES
-        LINK_FLAGS "/SUBSYSTEM:CONSOLE /ENTRY:wmainCRTStartup /GUARD:NO /MAP /DEBUG"
     )
 endif()

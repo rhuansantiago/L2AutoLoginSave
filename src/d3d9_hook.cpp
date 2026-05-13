@@ -135,6 +135,17 @@ PFN_ExecThiscall g_origExecShowWindowGFx      = nullptr;
 // is the server-list popup.
 volatile bool g_loginInProgress = false;
 
+// Disconnect-return detection: every UGFxUIScript::ShowWindow `this`
+// pointer observed BEFORE the first AuthLogin attempt is recorded as a
+// "pre-auth window" (Login UI, splash, etc.). After AuthLogin has fired,
+// any subsequent ShowWindow on a `this` in this set means we're back to
+// the login phase — including the disconnect path that bypasses
+// execGotoLogin entirely.
+constexpr int kMaxPreAuthWnds = 8;
+void* g_preAuthWnd[kMaxPreAuthWnds] = {};
+int   g_preAuthCount = 0;
+volatile bool g_authLoginSeen = false;
+
 bool ResolveNativeLogin() {
     if (g_pAuthLogin) return true;
     HMODULE hNW = GetModuleHandleW(L"NWindow.dll");
@@ -208,10 +219,16 @@ static void AutoCaptureLogin(const wchar_t* user, const wchar_t* pass) {
 
 // MinHook detour for the AuthLogin internal fn. Fires for BOTH our overlay
 // (which sets g_inOurAuthLogin) and for the L2 native login UI. When the
-// game itself submitted, we capture the credentials.
+// game itself submitted, we capture the credentials AND force-show the
+// overlay (game-initiated AuthLogin proves the user is back on the login
+// screen — covers the disconnect path that bypasses execGotoLogin).
 int __stdcall HookAuthLogin(wchar_t* user, wchar_t* pass, int otp) {
+    g_authLoginSeen = true;  // unlock pre-auth re-show detection
     if (!g_inOurAuthLogin) {
         AutoCaptureLogin(user, pass);
+        Logf("HookAuthLogin (game-initiated) — forcing overlay visible");
+        g_overlayShow = true;
+        g_loginInProgress = true;  // re-arm ShowWindow probe for the next transition
     }
     return g_origAuthLogin(user, pass, otp);
 }
@@ -226,6 +243,7 @@ bool LoginNative(const std::wstring& user, const std::wstring& pass) {
     // suppress capture either way.
     PFN_AuthLogin fn = g_origAuthLogin ? g_origAuthLogin : g_pAuthLogin;
     g_inOurAuthLogin = true;
+    g_authLoginSeen  = true;  // unlock pre-auth re-show detection
     int rc = SafeAuthLoginCall(fn, u.data(), p.data(), /*otp*/ 0);
     g_inOurAuthLogin = false;
     if (rc == -1) {
@@ -331,13 +349,20 @@ void DrawOverlay() {
     if (!g_overlayShow) return;
 
     ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowSize(ImVec2(290, 0), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 310, 60), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(290, 0), ImVec2(290, FLT_MAX));
+    // Fixed size, left-center of the game window. ImGuiCond_Appearing snaps
+    // back to this position/size every time the overlay re-opens (after
+    // INSERT-toggle or auto-show on return to login), but lets the user
+    // drag/resize during a single visible session.
+    constexpr float kWinW = 290.0f;
+    constexpr float kWinH = 420.0f;
+    ImGui::SetNextWindowSize(ImVec2(kWinW, kWinH), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(
+        ImVec2(20.0f, io.DisplaySize.y * 0.5f),
+        ImGuiCond_Appearing,
+        ImVec2(0.0f, 0.5f));  // pivot: left edge, vertical center
 
-    if (ImGui::Begin("Saved accounts", &g_overlayShow, ImGuiWindowFlags_NoCollapse)) {
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 60);
-        ImGui::TextColored(ImVec4(0.39f, 0.63f, 0.91f, 1.0f), "AntiCheat");
+    if (ImGui::Begin("Saved accounts", &g_overlayShow,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) {
         ImGui::Separator();
 
         // List of populated slots only. Click to select, double-click to
@@ -345,7 +370,12 @@ void DrawOverlay() {
         // alternate background tint (zebra) for readability.
         const ImU32 kZebraColor = IM_COL32(255, 255, 255, 14);
         int populated = 0;
-        if (ImGui::BeginListBox("##slots", ImVec2(-1, 220))) {
+        // Reserve ~95 px at the bottom for [Log In][+] + hint lines. The
+        // listbox gets the rest and shows a scrollbar when content overflows.
+        const float kReserveBottom = 95.0f;
+        float listH = ImGui::GetContentRegionAvail().y - kReserveBottom;
+        if (listH < 80.0f) listH = 80.0f;
+        if (ImGui::BeginListBox("##slots", ImVec2(-1, listH))) {
             for (int i = 0; i < kNumSlots; i++) {
                 Account& a = AccountsGet(i);
                 if (a.empty()) continue;
@@ -539,13 +569,51 @@ void InitImGuiIfNeeded(IDirect3DDevice9* dev) {
     io.IniFilename = nullptr;  // don't persist imgui.ini next to L2.exe
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
+    // Flat theme — zero rounding, neutral grayscale, no gradients.
     ImGui::StyleColorsDark();
     ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 4.0f;
-    s.FrameRounding  = 3.0f;
-    s.WindowBorderSize = 1.0f;
-    s.Colors[ImGuiCol_WindowBg]      = ImVec4(0.07f, 0.08f, 0.10f, 0.95f);
-    s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.10f, 0.20f, 0.40f, 1.0f);
+    s.WindowRounding    = 0.0f;
+    s.ChildRounding     = 0.0f;
+    s.FrameRounding     = 0.0f;
+    s.PopupRounding     = 0.0f;
+    s.ScrollbarRounding = 0.0f;
+    s.GrabRounding      = 0.0f;
+    s.TabRounding       = 0.0f;
+    s.WindowBorderSize  = 1.0f;
+    s.FrameBorderSize   = 0.0f;
+    s.PopupBorderSize   = 1.0f;
+    s.ItemSpacing       = ImVec2(8, 6);
+    s.FramePadding      = ImVec2(8, 5);
+    s.WindowPadding     = ImVec2(10, 10);
+    auto& c = s.Colors;
+    const ImVec4 kBg     (0.09f, 0.10f, 0.12f, 0.97f);
+    const ImVec4 kBgAlt  (0.13f, 0.14f, 0.17f, 1.00f);
+    const ImVec4 kAccent (0.27f, 0.45f, 0.70f, 1.00f);
+    const ImVec4 kBorder (0.20f, 0.22f, 0.25f, 1.00f);
+    c[ImGuiCol_WindowBg]        = kBg;
+    c[ImGuiCol_PopupBg]         = kBg;
+    c[ImGuiCol_ChildBg]         = kBgAlt;
+    c[ImGuiCol_FrameBg]         = kBgAlt;
+    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.18f, 0.20f, 0.24f, 1.00f);
+    c[ImGuiCol_FrameBgActive]   = ImVec4(0.22f, 0.24f, 0.28f, 1.00f);
+    c[ImGuiCol_TitleBg]         = kBg;
+    c[ImGuiCol_TitleBgActive]   = kBg;
+    c[ImGuiCol_TitleBgCollapsed]= kBg;
+    c[ImGuiCol_Border]          = kBorder;
+    c[ImGuiCol_Button]          = kBgAlt;
+    c[ImGuiCol_ButtonHovered]   = ImVec4(0.20f, 0.22f, 0.26f, 1.00f);
+    c[ImGuiCol_ButtonActive]    = kAccent;
+    c[ImGuiCol_Header]          = kBgAlt;
+    c[ImGuiCol_HeaderHovered]   = ImVec4(0.20f, 0.22f, 0.26f, 1.00f);
+    c[ImGuiCol_HeaderActive]    = kAccent;
+    c[ImGuiCol_Separator]       = kBorder;
+    c[ImGuiCol_SeparatorHovered]= kBorder;
+    c[ImGuiCol_SeparatorActive] = kBorder;
+    c[ImGuiCol_CheckMark]       = kAccent;
+    c[ImGuiCol_ScrollbarBg]     = kBg;
+    c[ImGuiCol_ScrollbarGrab]   = kBgAlt;
+    c[ImGuiCol_Text]            = ImVec4(0.86f, 0.88f, 0.91f, 1.00f);
+    c[ImGuiCol_TextDisabled]    = ImVec4(0.50f, 0.52f, 0.55f, 1.00f);
 
     ImGui_ImplWin32_Init(g_hostHwnd);
     ImGui_ImplDX9_Init(dev);
@@ -581,36 +649,61 @@ static unsigned int SafeReadU32(const void* p) {
     __except(EXCEPTION_EXECUTE_HANDLER) { return 0xDEADBEEFu; }
 }
 
-// UGFxUIScript::ShowWindow — fires for every Flash-driven UI window, every
-// time it's shown. While a login is in progress (post-AuthLogin, pre-final
-// transition), dump `this`+16 DWORDs and the NCLobbyWnd UClass* so we can
-// identify which slot in the UObject layout holds Class. When `this->Class
-// == NCLobbyWnd`, we know the server-list popup is opening → hide.
+// UGFxUIScript::ShowWindow — fires for every Flash-driven UI window. Three
+// jobs:
+//  1. Before any AuthLogin: register `this` as a pre-auth window (Login UI,
+//     splash, etc.).
+//  2. After AuthLogin, hide overlay if `this->Class == NCLobbyWnd` (works
+//     for builds that route the server-list popup through ShowWindow).
+//  3. After AuthLogin, if `this` is in the pre-auth set, the login phase
+//     is back — show overlay. Covers the disconnect-return path where
+//     execGotoLogin is never called.
 void __fastcall HookExecShowWindowGFx(void* This, void* /*edx*/, void* FFrame, void* result) {
-    if (g_loginInProgress && This && g_profile) {
+    if (This && g_profile) {
         HMODULE hNW = GetModuleHandleW(L"NWindow.dll");
         void* ncLobby = nullptr;
         if (hNW) {
             ncLobby = (void*)SafeReadU32((char*)hNW + g_profile->rvaAutoclassNCLobbyWnd);
         }
-        unsigned int dw[16] = {};
-        for (int i = 0; i < 16; ++i) {
-            dw[i] = SafeReadU32((char*)This + i * 4);
+
+        // Phase 1: pre-auth recording.
+        if (!g_authLoginSeen) {
+            bool already = false;
+            for (int i = 0; i < g_preAuthCount; ++i) {
+                if (g_preAuthWnd[i] == This) { already = true; break; }
+            }
+            if (!already && g_preAuthCount < kMaxPreAuthWnds) {
+                g_preAuthWnd[g_preAuthCount++] = This;
+                Logf("PreAuth: registered window #%d this=%p", g_preAuthCount, This);
+            }
+        } else {
+            // Phase 3: re-show of a pre-auth window after we've already
+            // started auth at least once → back to login.
+            for (int i = 0; i < g_preAuthCount; ++i) {
+                if (g_preAuthWnd[i] == This) {
+                    if (!g_overlayShow) {
+                        Logf("PreAuth wnd #%d re-shown (this=%p) → back to login → show overlay",
+                             i + 1, This);
+                        g_overlayShow = true;
+                        g_loginInProgress = false;
+                    }
+                    break;
+                }
+            }
         }
-        // Look for any DWORD slot matching the NCLobbyWnd UClass pointer.
+
+        // Phase 2: NCLobbyWnd class match.
+        unsigned int dw[16] = {};
+        for (int i = 0; i < 16; ++i) dw[i] = SafeReadU32((char*)This + i * 4);
         int matchOffset = -1;
         for (int i = 0; i < 16; ++i) {
             if (dw[i] == (unsigned int)(uintptr_t)ncLobby && ncLobby != nullptr) {
                 matchOffset = i * 4; break;
             }
         }
-        Logf("ShowWindow this=%p NCLobby=%p match@+0x%x  dw[0..7]=%08x %08x %08x %08x %08x %08x %08x %08x",
-             This, ncLobby, matchOffset,
-             dw[0], dw[1], dw[2], dw[3], dw[4], dw[5], dw[6], dw[7]);
-        Logf("                     dw[8..15]=%08x %08x %08x %08x %08x %08x %08x %08x",
-             dw[8], dw[9], dw[10], dw[11], dw[12], dw[13], dw[14], dw[15]);
         if (matchOffset >= 0) {
-            Logf("  → NCLobbyWnd class match → hide overlay");
+            Logf("ShowWindow: NCLobbyWnd class match @+0x%x (this=%p) → hide overlay",
+                 matchOffset, This);
             g_overlayShow = false;
             g_loginInProgress = false;
         }

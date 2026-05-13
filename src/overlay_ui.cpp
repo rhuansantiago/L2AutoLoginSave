@@ -21,23 +21,81 @@ namespace {
 Account g_slots[kNumSlots];
 LoginCoords g_coords;
 
-std::wstring GetStoragePath() {
-    wchar_t appdata[MAX_PATH] = {0};
-    SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata);
-    std::wstring p = appdata;
-    p += L"\\hollow_l2_overlay";
-    CreateDirectoryW(p.c_str(), nullptr);
-    p += L"\\accounts.dat";
-    return p;
+// FNV-1a 32-bit over the path lowercased per wchar_t — Windows file paths
+// are case-insensitive, so case shouldn't change the scope identity.
+uint32_t Fnv1aW_LowerCase(const wchar_t* s) {
+    uint32_t h = 2166136261u;
+    for (; *s; ++s) {
+        wchar_t c = (wchar_t)towlower((wint_t)*s);
+        h ^= (uint8_t)(c & 0xff);        h *= 16777619u;
+        h ^= (uint8_t)((c >> 8) & 0xff); h *= 16777619u;
+    }
+    return h;
 }
-std::wstring GetCoordsPath() {
+
+// Per-install scope dir: %APPDATA%\hollow_l2_overlay\<hash8> where hash8 is
+// FNV-1a of the running L2.exe's full path. Two installs (different dirs,
+// renamed System folder, different server) get distinct account stores
+// even though they all run our DLL. Writes a one-line info.txt the first
+// time a scope dir is created, so users can identify which dir is which.
+std::wstring GetScopeDir() {
+    static std::wstring s_cached;
+    if (!s_cached.empty()) return s_cached;
+
     wchar_t appdata[MAX_PATH] = {0};
     SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata);
-    std::wstring p = appdata;
-    p += L"\\hollow_l2_overlay";
-    CreateDirectoryW(p.c_str(), nullptr);
-    p += L"\\coords.dat";
-    return p;
+    std::wstring base = appdata;
+    base += L"\\hollow_l2_overlay";
+    CreateDirectoryW(base.c_str(), nullptr);
+
+    wchar_t exePath[MAX_PATH] = {0};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    wchar_t scope[16];
+    swprintf(scope, 16, L"%08x", Fnv1aW_LowerCase(exePath));
+
+    std::wstring full = base + L"\\" + scope;
+    CreateDirectoryW(full.c_str(), nullptr);
+
+    // Drop an info.txt the first time we create the scope dir, so the user
+    // can tell which folder belongs to which install. CREATE_NEW = no
+    // overwrite on subsequent runs.
+    std::wstring info = full + L"\\info.txt";
+    HANDLE h = CreateFileW(info.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        char line[MAX_PATH * 2];
+        int n = _snprintf(line, sizeof(line),
+                          "scope = %08x\r\nL2.exe = %ls\r\n",
+                          Fnv1aW_LowerCase(exePath), exePath);
+        DWORD w = 0;
+        WriteFile(h, line, (DWORD)n, &w, nullptr);
+        CloseHandle(h);
+    }
+    s_cached = full;
+    Logf("Storage scope: %ls", full.c_str());
+    return s_cached;
+}
+
+std::wstring GetStoragePath() { return GetScopeDir() + L"\\accounts.dat"; }
+std::wstring GetCoordsPath()  { return GetScopeDir() + L"\\coords.dat";   }
+
+// Migration helper: if the per-scope file doesn't exist but the legacy
+// global one (from before per-install scoping) does, copy it across so
+// users don't lose their saved accounts on upgrade.
+void MigrateLegacyIfNeeded(const wchar_t* leafName) {
+    std::wstring newPath = GetScopeDir() + L"\\" + leafName;
+    if (GetFileAttributesW(newPath.c_str()) != INVALID_FILE_ATTRIBUTES) return;
+
+    wchar_t appdata[MAX_PATH] = {0};
+    SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata);
+    std::wstring legacy = appdata;
+    legacy += L"\\hollow_l2_overlay\\";
+    legacy += leafName;
+    if (GetFileAttributesW(legacy.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+
+    if (CopyFileW(legacy.c_str(), newPath.c_str(), TRUE)) {
+        Logf("Migrated legacy %ls into scope dir", leafName);
+    }
 }
 
 }  // namespace
@@ -71,6 +129,7 @@ std::wstring DpapiUnprotect(const std::vector<BYTE>& blob) {
 }
 
 void AccountsLoad() {
+    MigrateLegacyIfNeeded(L"accounts.dat");
     std::wstring path = GetStoragePath();
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -154,6 +213,7 @@ Account& AccountsGet(int slot) {
 LoginCoords& CoordsGet() { return g_coords; }
 
 void CoordsLoad() {
+    MigrateLegacyIfNeeded(L"coords.dat");
     HANDLE h = CreateFileW(GetCoordsPath().c_str(), GENERIC_READ, FILE_SHARE_READ,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) { Logf("CoordsLoad: no file (not calibrated yet)"); return; }
