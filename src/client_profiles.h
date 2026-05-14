@@ -28,7 +28,11 @@ struct ClientProfile {
     uintptr_t rvaExecGotoLogin;            // UUIScript::execGotoLogin
     uintptr_t rvaExecRequestLoginServer;   // UUIScript::execRequestLoginServer
     uintptr_t rvaExecShowWindowGFx;        // UGFxUIScript::execShowWindow
-    uintptr_t rvaAutoclassNCLobbyWnd;      // *UClass for NCLobbyWnd
+    uintptr_t rvaAutoclassNCLobbyWnd;      // *UClass for NCLobbyWnd (post-login lobby)
+    uintptr_t rvaExecSetEulaText;          // UGFxUIScript::SetEulaText — EULA shown
+    uintptr_t rvaExecEulaAgree;            // UUIScript::EulaAgree — EULA closed
+    uintptr_t rvaAutoclassNCEulaWnd;       // *UClass for NCEulaWnd (EULA dialog base)
+    uintptr_t rvaUUIEventManagerExecuteEvent;  // internal ExecuteEvent(int eventID, FString*)
 
     // -------- Interlude-only (zero for Essence) ----------------------------
     // All RVAs are inside engine.dll.
@@ -44,30 +48,30 @@ struct ClientProfile {
 static const ClientProfile kClientProfiles[] = {
     // -------- Essence family (probe NWindow.dll) ---------------------------
     { L"NWindow.dll", 0x6708d7c8, "Essence 474",             kFamilyEssence,
-      0x856630, 0x9af0b0, 0x9c19d0, 0x985c30, 0x110efb8,
+      0x856630, 0x9af0b0, 0x9c19d0, 0x985c30, 0x110efb8, 0x983b80, 0x98eee0, 0x110efd8, 0x939050,
       0,0,0,0,0,0 },
     { L"NWindow.dll", 0x678f9987, "Essence 509",             kFamilyEssence,
-      0x84fca0, 0x9a6ee0, 0x9b8920, 0x97f620, 0x10fbf80,
+      0x84fca0, 0x9a6ee0, 0x9b8920, 0x97f620, 0x10fbf80, 0x97d570, 0x988970, 0x10fbfa0, 0x933050,
       0,0,0,0,0,0 },
     { L"NWindow.dll", 0x6422e278, "Essence Assassins",       kFamilyEssence,
-      0x883610, 0x9d39b0, 0x9e59f0, 0x9ad800, 0x114e248,
+      0x883610, 0x9d39b0, 0x9e59f0, 0x9ad800, 0x114e248, 0x9ab7a0, 0x9b6560, 0x114e268, 0x961360,
       0,0,0,0,0,0 },
     { L"NWindow.dll", 0x68394700, "Essence 520 RoseVein",    kFamilyEssence,
-      0x857fd0, 0x9b20f0, 0x9c3ec0, 0x98a310, 0x111bfe8,
+      0x857fd0, 0x9b20f0, 0x9c3ec0, 0x98a310, 0x111bfe8, 0x988260, 0x9938d0, 0x111c008, 0x93e4a0,
       0,0,0,0,0,0 },
     { L"NWindow.dll", 0x692828e1, "Essence 541 SamuraiCrow", kFamilyEssence,
-      0x8770e0, 0x9da350, 0x9eded0, 0x9adfb0, 0x1166e78,
+      0x8770e0, 0x9da350, 0x9eded0, 0x9adfb0, 0x1166e78, 0x9abf00, 0x9b7980, 0x1166e98, 0x961080,
       0,0,0,0,0,0 },
     { L"NWindow.dll", 0x69b8ec54, "Essence 557",             kFamilyEssence,
-      0x879e50, 0x9ddca0, 0x9f1910, 0x9b10d0, 0x116de90,
+      0x879e50, 0x9ddca0, 0x9f1910, 0x9b10d0, 0x116de90, 0x9af020, 0x9baaa0, 0x116deb0, 0x9641d0,
       0,0,0,0,0,0 },
     { L"NWindow.dll", 0x5cb5b1d2, "Lucera2 Classic",         kFamilyEssence,
-      0x575670, 0x697ca0, 0x6a8750, 0x67c060, 0x0cbc05c,
+      0x575670, 0x697ca0, 0x6a8750, 0x67c060, 0x0cbc05c, 0x67a0f0, 0x6841b0, 0x0cbc084, 0x633a50,
       0,0,0,0,0,0 },
 
     // -------- Interlude family (probe engine.dll) --------------------------
     { L"engine.dll", 0x46dbe989, "Lucera TestPatch (Interlude)", kFamilyInterlude,
-      0,0,0,0,0,                            // no NWindow RVAs
+      0,0,0,0,0,0,0,0,0,                    // no NWindow / EULA / ExecuteEvent RVAs
       /*UNHInit*/                0x3ab2,
       /*UNHRequestAuthLogin*/    0x5060,
       /*UNHRequestServerLogin*/  0xbb04,

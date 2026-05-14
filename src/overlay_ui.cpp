@@ -34,10 +34,14 @@ uint32_t Fnv1aW_LowerCase(const wchar_t* s) {
 }
 
 // Per-install scope dir: %APPDATA%\hollow_l2_overlay\<hash8> where hash8 is
-// FNV-1a of the running L2.exe's full path. Two installs (different dirs,
-// renamed System folder, different server) get distinct account stores
-// even though they all run our DLL. Writes a one-line info.txt the first
-// time a scope dir is created, so users can identify which dir is which.
+// FNV-1a of the System folder (parent of L2.exe). Two installs (different
+// folders, different chronicle, different server) get distinct account
+// stores. Folder-based identity means renaming/replacing the L2.exe
+// binary (patches, .exe.original backups) doesn't churn the scope.
+//
+// Migrates legacy scopes — earlier versions used the L2.exe full path as
+// the hash key. If a directory under that old name exists, we rename it
+// to the new folder-based name on first run.
 std::wstring GetScopeDir() {
     static std::wstring s_cached;
     if (!s_cached.empty()) return s_cached;
@@ -50,23 +54,41 @@ std::wstring GetScopeDir() {
 
     wchar_t exePath[MAX_PATH] = {0};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    wchar_t scope[16];
-    swprintf(scope, 16, L"%08x", Fnv1aW_LowerCase(exePath));
 
+    // System folder = dirname(exePath).
+    std::wstring sysDir = exePath;
+    size_t lastBs = sysDir.find_last_of(L'\\');
+    if (lastBs != std::wstring::npos) sysDir.resize(lastBs);
+
+    wchar_t scope[16];
+    swprintf(scope, 16, L"%08x", Fnv1aW_LowerCase(sysDir.c_str()));
     std::wstring full = base + L"\\" + scope;
+
+    // One-shot migration from legacy L2.exe-path scope name.
+    if (GetFileAttributesW(full.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        wchar_t legacyScope[16];
+        swprintf(legacyScope, 16, L"%08x", Fnv1aW_LowerCase(exePath));
+        std::wstring legacyFull = base + L"\\" + legacyScope;
+        if (GetFileAttributesW(legacyFull.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            if (MoveFileW(legacyFull.c_str(), full.c_str())) {
+                Logf("Scope migrated: legacy %ls (L2.exe-path) -> %ls (system-folder)",
+                     legacyScope, scope);
+            }
+        }
+    }
+
     CreateDirectoryW(full.c_str(), nullptr);
 
-    // Drop an info.txt the first time we create the scope dir, so the user
-    // can tell which folder belongs to which install. CREATE_NEW = no
-    // overwrite on subsequent runs.
+    // Drop an info.txt the first time we create the scope dir. CREATE_NEW =
+    // no overwrite on subsequent runs (preserves info from earlier scope).
     std::wstring info = full + L"\\info.txt";
     HANDLE h = CreateFileW(info.c_str(), GENERIC_WRITE, 0, nullptr,
                            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
         char line[MAX_PATH * 2];
         int n = _snprintf(line, sizeof(line),
-                          "scope = %08x\r\nL2.exe = %ls\r\n",
-                          Fnv1aW_LowerCase(exePath), exePath);
+                          "scope        = %08x\r\nSystem folder = %ls\r\nL2.exe       = %ls\r\n",
+                          Fnv1aW_LowerCase(sysDir.c_str()), sysDir.c_str(), exePath);
         DWORD w = 0;
         WriteFile(h, line, (DWORD)n, &w, nullptr);
         CloseHandle(h);

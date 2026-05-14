@@ -127,6 +127,30 @@ using PFN_ExecThiscall = void (__thiscall*)(void* This, void* FFrame, void* resu
 PFN_ExecThiscall g_origExecGotoLogin          = nullptr;
 PFN_ExecThiscall g_origExecRequestLoginServer = nullptr;
 PFN_ExecThiscall g_origExecShowWindowGFx      = nullptr;
+PFN_ExecThiscall g_origExecSetEulaText        = nullptr;
+PFN_ExecThiscall g_origExecEulaAgree          = nullptr;
+
+// Set while the EULA dialog is on screen. DrawOverlay suppresses output
+// while this is true so our window doesn't paint over the legal notice.
+volatile bool g_eulaShown = false;
+
+// __fastcall on x86 — ECX=arg0, EDX=arg1, rest on stack. The internal
+// UUIEventManager::ExecuteEvent dispatcher takes (int eventID, FString*
+// param) in (ECX, EDX). Hooking it gives us THE proper signal for the
+// auth flow: EV_LoginOK / EV_LoginFail / EV_ShowEula / EV_ServerList all
+// pass through this one function.
+using PFN_ExecuteEvent = void (__fastcall*)(int eventID, void* param);
+PFN_ExecuteEvent g_origExecuteEvent = nullptr;
+
+// Within-session learning: captured `this` pointers for the EULA dialog
+// and the server-list popup (both GFxUIScript-derived UScript classes).
+// First time the user interacts with each, we capture; subsequent
+// ShowWindow calls with the same `this` know to hide our overlay.
+// Heap-allocated so they change per session — first encounter in any
+// given session still shows the overlay (acceptable trade-off without
+// deeper UClass/FName reflection).
+void* g_eulaWndThis       = nullptr;
+void* g_serverListWndThis = nullptr;
 
 // --------------------------- Interlude family --------------------------------
 // All Interlude hooks are __thiscall on member functions (this in ECX).
@@ -260,12 +284,11 @@ static void AutoCaptureLogin(const wchar_t* user, const wchar_t* pass) {
 // overlay (game-initiated AuthLogin proves the user is back on the login
 // screen — covers the disconnect path that bypasses execGotoLogin).
 int __stdcall HookAuthLogin(wchar_t* user, wchar_t* pass, int otp) {
-    g_authLoginSeen = true;  // unlock pre-auth re-show detection
+    g_authLoginSeen = true;
     if (!g_inOurAuthLogin) {
         AutoCaptureLogin(user, pass);
-        Logf("HookAuthLogin (game-initiated) — forcing overlay visible");
-        g_overlayShow = true;
-        g_loginInProgress = true;  // re-arm ShowWindow probe for the next transition
+        Logf("HookAuthLogin (game-initiated) — login submitted (state controlled by ExecuteEvent hook)");
+        g_loginInProgress = true;
     }
     return g_origAuthLogin(user, pass, otp);
 }
@@ -308,6 +331,10 @@ bool LoginNative(const std::wstring& user, const std::wstring& pass) {
         return false;
     }
     Logf("LoginNative: AuthLogin returned %d for user='%ls'", rc, user.c_str());
+    // Don't touch g_overlayShow here — UUIEventManager::ExecuteEvent
+    // (hooked separately) is the authoritative state source. It will
+    // fire EV_LoginOK / EV_LoginFail / EV_ShowEula / EV_ServerList in
+    // response to the server packet and toggle the overlay correctly.
     if (rc != 0) {
         // Arm ShowWindow probing — every subsequent UGFxUIScript::ShowWindow
         // call gets dumped until we identify the server-list popup or some
@@ -404,6 +431,7 @@ static int CommitAccountModal() {
 
 void DrawOverlay() {
     if (!g_overlayShow) return;
+    if (g_eulaShown) return;  // never paint over the EULA dialog
 
     ImGuiIO& io = ImGui::GetIO();
     // Fixed size, left-center of the game window. ImGuiCond_Appearing snaps
@@ -625,6 +653,11 @@ void InitImGuiIfNeeded(IDirect3DDevice9* dev) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;  // don't persist imgui.ini next to L2.exe
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Don't fight the game over cursor shape. L2 paints its own cursor in
+    // the game world; if ImGui's Win32 backend also calls SetCursor each
+    // frame, the two flicker against each other. We give up cursor hints
+    // (no I-beam in InputText, no resize arrow) for a stable game cursor.
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
     // Flat theme — zero rounding, neutral grayscale, no gradients.
     ImGui::StyleColorsDark();
@@ -693,11 +726,104 @@ void __fastcall HookExecGotoLogin(void* This, void* /*edx*/, void* FFrame, void*
     g_loginInProgress = false;
     g_origExecGotoLogin(This, FFrame, result);
 }
+// Forward decl — defined later in the file.
+static unsigned int SafeReadU32(const void* p);
+
+// Dump the first 32 DWORDs of a UScript object so we can fingerprint its
+// class across sessions (Class pointer is somewhere in there, but its
+// offset varies per build).
+static void DumpThisHeader(const char* tag, void* This) {
+    unsigned int dw[32] = {};
+    for (int i = 0; i < 32; ++i) dw[i] = SafeReadU32((char*)This + i * 4);
+    HMODULE hNW = GetModuleHandleW(L"NWindow.dll");
+    uintptr_t nwBase = (uintptr_t)hNW;
+    Logf("%s this=%p dw00-07=%08x %08x %08x %08x %08x %08x %08x %08x",
+         tag, This, dw[0],dw[1],dw[2],dw[3],dw[4],dw[5],dw[6],dw[7]);
+    Logf("                                dw08-15=%08x %08x %08x %08x %08x %08x %08x %08x",
+         dw[8],dw[9],dw[10],dw[11],dw[12],dw[13],dw[14],dw[15]);
+    Logf("                                dw16-23=%08x %08x %08x %08x %08x %08x %08x %08x",
+         dw[16],dw[17],dw[18],dw[19],dw[20],dw[21],dw[22],dw[23]);
+    Logf("                                dw24-31=%08x %08x %08x %08x %08x %08x %08x %08x",
+         dw[24],dw[25],dw[26],dw[27],dw[28],dw[29],dw[30],dw[31]);
+    Logf("  NWindow base=%p — slots inside NWindow image (likely class/vtable):", (void*)nwBase);
+    for (int i = 0; i < 32; ++i) {
+        uintptr_t v = dw[i];
+        if (v >= nwBase && v < nwBase + 0x2000000) {
+            Logf("    dw[%d]=0x%08x  rva=0x%lx", i, dw[i], (unsigned long)(v - nwBase));
+        }
+    }
+}
+
 void __fastcall HookExecRequestLoginServer(void* This, void* /*edx*/, void* FFrame, void* result) {
+    if (!g_serverListWndThis) {
+        g_serverListWndThis = This;
+        DumpThisHeader("Learned server-list popup", This);
+    }
     Logf("HookRequestLoginServer fired — user picked a server → hide overlay");
     g_overlayShow = false;
     g_loginInProgress = false;
     g_origExecRequestLoginServer(This, FFrame, result);
+}
+
+// UGFxUIScript::SetEulaText fires while the EULA dialog is being prepared
+// (the C++ side populating the text right before/during ShowWindow). Treat
+// it as "EULA is on screen" — suppress our overlay until EulaAgree.
+void __fastcall HookExecSetEulaText(void* This, void* /*edx*/, void* FFrame, void* result) {
+    if (!g_eulaShown) Logf("HookSetEulaText fired — EULA on screen → hide overlay");
+    g_eulaShown = true;
+    g_origExecSetEulaText(This, FFrame, result);
+}
+// UUIEventManager::ExecuteEvent — central UScript event dispatcher. Every
+// EV_* fires through here. We filter by event ID to drive overlay state.
+//
+//   EV_LoginBegin     (5630) → show overlay (login screen entered)
+//   EV_LoginFail      (5640) → show overlay (auth rejected)
+//   EV_LoginFailFlash (5641) → show overlay
+//   EV_LoginOK        (5650) → hide overlay (auth confirmed by server)
+//   EV_ShowEula       (5680) → hide overlay (EULA dialog opening)
+//   EV_ShowChinaEula  (5681) → hide overlay
+//   EV_ServerList     (5691) → hide overlay (server-list packet received)
+//   EV_ServerListEnd  (5692) → hide overlay (server-list popup shown)
+void __fastcall HookExecuteEvent(int eventID, void* param) {
+    switch (eventID) {
+        case 5630:                   // EV_LoginBegin
+        case 5640: case 5641:        // EV_LoginFail*
+            Logf("ExecuteEvent: %d (Login%s) → show overlay",
+                 eventID, eventID == 5630 ? "Begin" : "Fail");
+            g_overlayShow = true;
+            g_eulaShown = false;
+            break;
+        case 5650:                   // EV_LoginOK
+            Logf("ExecuteEvent: %d (LoginOK) → hide overlay", eventID);
+            g_overlayShow = false;
+            break;
+        case 5680: case 5681:        // EV_ShowEula / EV_ShowChinaEula
+            Logf("ExecuteEvent: %d (ShowEula) → hide overlay", eventID);
+            g_overlayShow = false;
+            g_eulaShown = true;
+            break;
+        case 5691: case 5692:        // EV_ServerList / EV_ServerListEnd
+            Logf("ExecuteEvent: %d (ServerList) → hide overlay", eventID);
+            g_overlayShow = false;
+            break;
+        default:
+            break;
+    }
+    g_origExecuteEvent(eventID, param);
+}
+
+// UUIScript::EulaAgree fires when the user clicks accept or decline. In
+// either case the EULA window is closing, so it's safe to re-show overlay.
+// We also learn `this` (= LogInEula instance) so future ShowWindow calls
+// with the same pointer can hide the overlay proactively.
+void __fastcall HookExecEulaAgree(void* This, void* /*edx*/, void* FFrame, void* result) {
+    if (!g_eulaWndThis) {
+        g_eulaWndThis = This;
+        DumpThisHeader("Learned EULA dialog", This);
+    }
+    Logf("HookEulaAgree fired — EULA dismissed → show overlay");
+    g_eulaShown = false;
+    g_origExecEulaAgree(This, FFrame, result);
 }
 
 // SEH-safe DWORD probe.
@@ -717,10 +843,32 @@ static unsigned int SafeReadU32(const void* p) {
 //     execGotoLogin is never called.
 void __fastcall HookExecShowWindowGFx(void* This, void* /*edx*/, void* FFrame, void* result) {
     if (This && g_profile) {
+        // Phase 0: known popups we want to hide for (learned within-session
+        // via HookExecEulaAgree / HookExecRequestLoginServer). Skip the
+        // pre-auth re-show logic in those cases — we don't want to confuse
+        // a popup re-show with a return-to-login.
+        if (This == g_eulaWndThis) {
+            if (!g_eulaShown) Logf("ShowWindow: known EULA this=%p → hide overlay", This);
+            g_eulaShown = true;
+            g_origExecShowWindowGFx(This, FFrame, result);
+            return;
+        }
+        if (This == g_serverListWndThis) {
+            if (g_overlayShow) Logf("ShowWindow: known server-list this=%p → hide overlay", This);
+            g_overlayShow = false;
+            g_loginInProgress = false;
+            g_origExecShowWindowGFx(This, FFrame, result);
+            return;
+        }
+
         HMODULE hNW = GetModuleHandleW(L"NWindow.dll");
         void* ncLobby = nullptr;
+        void* ncEula  = nullptr;
         if (hNW) {
             ncLobby = (void*)SafeReadU32((char*)hNW + g_profile->rvaAutoclassNCLobbyWnd);
+            if (g_profile->rvaAutoclassNCEulaWnd) {
+                ncEula = (void*)SafeReadU32((char*)hNW + g_profile->rvaAutoclassNCEulaWnd);
+            }
         }
 
         // Phase 1: pre-auth recording.
@@ -749,20 +897,26 @@ void __fastcall HookExecShowWindowGFx(void* This, void* /*edx*/, void* FFrame, v
             }
         }
 
-        // Phase 2: NCLobbyWnd class match.
+        // Phase 2: check class match against known popup classes. The object's
+        // Class pointer is somewhere in the first 64 bytes; scan and compare
+        // against autoclassNCLobbyWnd / autoclassNCEulaWnd.
         unsigned int dw[16] = {};
         for (int i = 0; i < 16; ++i) dw[i] = SafeReadU32((char*)This + i * 4);
-        int matchOffset = -1;
         for (int i = 0; i < 16; ++i) {
-            if (dw[i] == (unsigned int)(uintptr_t)ncLobby && ncLobby != nullptr) {
-                matchOffset = i * 4; break;
+            if (ncLobby && dw[i] == (unsigned int)(uintptr_t)ncLobby) {
+                Logf("ShowWindow: NCLobbyWnd class match @+0x%x (this=%p) → hide overlay",
+                     i * 4, This);
+                g_overlayShow = false;
+                g_loginInProgress = false;
+                break;
             }
-        }
-        if (matchOffset >= 0) {
-            Logf("ShowWindow: NCLobbyWnd class match @+0x%x (this=%p) → hide overlay",
-                 matchOffset, This);
-            g_overlayShow = false;
-            g_loginInProgress = false;
+            if (ncEula && dw[i] == (unsigned int)(uintptr_t)ncEula) {
+                if (!g_eulaShown) Logf("ShowWindow: NCEulaWnd class match @+0x%x (this=%p) → hide overlay",
+                                       i * 4, This);
+                g_eulaWndThis = This;  // cache so future shows can skip the scan
+                g_eulaShown = true;
+                break;
+            }
         }
     }
     g_origExecShowWindowGFx(This, FFrame, result);
@@ -784,8 +938,7 @@ int __fastcall HookUNHAuthLogin(void* This, void* /*edx*/, wchar_t* user, wchar_
     }
     if (!g_inOurAuthLogin) {
         AutoCaptureLogin(user, pass);
-        Logf("HookUNHAuthLogin (game-initiated) — forcing overlay visible");
-        g_overlayShow = true;
+        Logf("HookUNHAuthLogin (game-initiated) — submitted; state via UGE::OnAuth* hooks");
     }
     return g_origUNHAuthLogin(This, nullptr, user, pass, otp);
 }
@@ -836,6 +989,12 @@ static void EnsureClientHooks() {
                    (void**)&g_origExecShowWindowGFx,      "NWindow!UGFxUIScript::ShowWindow");
         installOne(g_profile->rvaAuthLoginInternal,      (void*)&HookAuthLogin,
                    (void**)&g_origAuthLogin,              "NWindow!AuthLogin");
+        installOne(g_profile->rvaExecSetEulaText,        (void*)&HookExecSetEulaText,
+                   (void**)&g_origExecSetEulaText,        "NWindow!UGFxUIScript::SetEulaText");
+        installOne(g_profile->rvaExecEulaAgree,          (void*)&HookExecEulaAgree,
+                   (void**)&g_origExecEulaAgree,          "NWindow!UUIScript::EulaAgree");
+        installOne(g_profile->rvaUUIEventManagerExecuteEvent, (void*)&HookExecuteEvent,
+                   (void**)&g_origExecuteEvent,           "NWindow!UUIEventManager::ExecuteEvent");
     } else {  // Interlude
         // Stash IsNotYetLogin entry for the polling loop.
         if (g_profile->rvaUNHIsNotYetLogin) {
@@ -860,6 +1019,15 @@ void RenderFrame(IDirect3DDevice9* dev) {
     InitImGuiIfNeeded(dev);
     if (!g_imguiReady) return;
     EnsureClientHooks();
+
+    // Skip ImGui frame processing entirely when the overlay isn't visible
+    // (manual hide, EULA on screen, post-login, etc.). The Win32 backend
+    // calls SetCursor() during NewFrame regardless of whether anything is
+    // drawn, which fights the game's own cursor management — the visible
+    // symptom is the in-game cursor flickering between the OS arrow and
+    // the game's painted cursor. Skipping the frame stops the fight.
+    if (!g_overlayShow || g_eulaShown) return;
+
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
