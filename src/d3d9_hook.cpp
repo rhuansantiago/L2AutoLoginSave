@@ -1043,6 +1043,17 @@ void DrawOverlay() {
 
     if (ImGui::Begin("Saved accounts", &g_overlayShow,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) {
+        // After window resize / fullscreen toggle the saved position may
+        // land off-screen. Clamp back if mostly outside the viewport.
+        ImVec2 pos  = ImGui::GetWindowPos();
+        ImVec2 size = ImGui::GetWindowSize();
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        const float kMargin = 50.0f;
+        bool offscreen = pos.x + size.x < kMargin || pos.y + size.y < kMargin ||
+                         pos.x > disp.x - kMargin || pos.y > disp.y - kMargin;
+        if (offscreen && disp.x > 0 && disp.y > 0) {
+            ImGui::SetWindowPos(ImVec2(20.0f, disp.y * 0.5f - size.y * 0.5f));
+        }
         ImGui::Separator();
 
         // List of populated slots only. Click to select, double-click to
@@ -1229,7 +1240,28 @@ LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 // -----------------------------------------------------------------------------
 // Hook bodies
 // -----------------------------------------------------------------------------
+static IDirect3DDevice9* s_initializedDev = nullptr;
+
 void InitImGuiIfNeeded(IDirect3DDevice9* dev) {
+    // Detect device-pointer change — happens when the engine destroys and
+    // recreates the D3D9 device (some fullscreen toggles, alt-tab cycles,
+    // and the "return to login after long play" path). Our hooks on the
+    // shared vtable still fire on the new device, but ImGui's DX9 backend
+    // holds the old pointer internally. Shut down and re-init when this
+    // happens so rendering keeps working.
+    if (g_imguiReady && dev != s_initializedDev) {
+        Logf("Device changed (was %p, now %p) — re-initializing ImGui",
+             s_initializedDev, dev);
+        if (g_hostHwnd && g_origWndProc) {
+            SetWindowLongPtrW(g_hostHwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
+            g_origWndProc = nullptr;
+        }
+        ImGui_ImplDX9_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        g_imguiReady = false;
+        s_initializedDev = nullptr;
+    }
     if (g_imguiReady) return;
 
     D3DDEVICE_CREATION_PARAMETERS p = {};
@@ -1309,6 +1341,7 @@ void InitImGuiIfNeeded(IDirect3DDevice9* dev) {
                                                 (LONG_PTR)HookWndProc);
 
     g_imguiReady = true;
+    s_initializedDev = dev;
     Logf("InitImGui: ImGui live (hwnd=%p, dev=%p)", g_hostHwnd, dev);
 }
 
