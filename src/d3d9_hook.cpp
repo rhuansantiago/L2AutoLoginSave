@@ -1212,7 +1212,14 @@ LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
-    if (g_imguiReady) {
+    // System-key messages (Alt held, Alt+Enter, F10, etc) are game/system
+    // shortcuts. Don't feed them to ImGui — otherwise Alt highlights the
+    // window's close 'x' via nav and Enter then closes the overlay. These
+    // messages go straight to the game.
+    bool isSysKey = (msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP ||
+                     msg == WM_SYSCHAR    || msg == WM_SYSDEADCHAR);
+
+    if (g_imguiReady && !isSysKey) {
         ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp);
 
         if (g_overlayShow) {
@@ -1220,9 +1227,8 @@ LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (io.WantCaptureKeyboard) {
                 switch (msg) {
                     case WM_KEYDOWN: case WM_KEYUP:
-                    case WM_SYSKEYDOWN: case WM_SYSKEYUP:
-                    case WM_CHAR: case WM_SYSCHAR:
-                    case WM_DEADCHAR: case WM_SYSDEADCHAR:
+                    case WM_CHAR:
+                    case WM_DEADCHAR:
                     case WM_UNICHAR:
                     case WM_IME_CHAR:
                         return 0;
@@ -1280,7 +1286,9 @@ void InitImGuiIfNeeded(IDirect3DDevice9* dev) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;  // don't persist imgui.ini next to L2.exe
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // No keyboard nav — Alt would highlight the close X and Enter would
+    // close the window, plus the user expects Alt+Enter to toggle the
+    // game's fullscreen mode. Tab focus on input fields still works.
     // Don't fight the game over cursor shape. L2 paints its own cursor in
     // the game world; if ImGui's Win32 backend also calls SetCursor each
     // frame, the two flicker against each other. We give up cursor hints
@@ -2315,19 +2323,23 @@ HRESULT __stdcall HookPresentEx(IDirect3DDevice9* dev, const RECT* src,
 
 HRESULT __stdcall HookReset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     InterlockedIncrement(&g_callsReset);
-    Logf("HookReset called");
     if (g_imguiReady) ImGui_ImplDX9_InvalidateDeviceObjects();
     HRESULT hr = g_origReset(dev, pp);
-    if (g_imguiReady) ImGui_ImplDX9_CreateDeviceObjects();
+    Logf("HookReset returned 0x%08x", hr);
+    // Only recreate device objects when Reset succeeded. On D3DERR_DEVICELOST
+    // (e.g. exiting fullscreen sometimes), the device is still not usable;
+    // creating resources on it would either fail or corrupt state. ImGui's
+    // NewFrame will call CreateDeviceObjects lazily once the device is back.
+    if (SUCCEEDED(hr) && g_imguiReady) ImGui_ImplDX9_CreateDeviceObjects();
     return hr;
 }
 
 HRESULT __stdcall HookResetEx(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     InterlockedIncrement(&g_callsReset);
-    Logf("HookResetEx called");
     if (g_imguiReady) ImGui_ImplDX9_InvalidateDeviceObjects();
     HRESULT hr = g_origResetEx(dev, pp);
-    if (g_imguiReady) ImGui_ImplDX9_CreateDeviceObjects();
+    Logf("HookResetEx returned 0x%08x", hr);
+    if (SUCCEEDED(hr) && g_imguiReady) ImGui_ImplDX9_CreateDeviceObjects();
     return hr;
 }
 
