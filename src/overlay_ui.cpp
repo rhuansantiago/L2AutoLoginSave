@@ -273,8 +273,22 @@ void CoordsSave() {
 // device creation in particular pulls in COM init + driver DLLs and was
 // causing L2.exe to fail startup with STATUS_DLL_INIT_FAILED (0xC0000142)
 // when run inside DllMain.
+// Forward decl from d3d9_hook.cpp — we want to install client hooks (engine
+// or NWindow) BEFORE the 2-second D3D9 settle wait. For the Interlude
+// family this is mandatory: UNetworkHandler::Init runs during engine
+// startup and we must hook it before that fires to capture the singleton.
+void EnsureClientHooksPublic();
+
 static DWORD WINAPI InstallWorker(LPVOID /*lpv*/) {
-    Logf("InstallWorker: started, sleeping 2s for L2 init to settle...");
+    Logf("InstallWorker: started");
+    // Try installing client hooks (Engine.dll for Interlude, NWindow.dll
+    // for Essence) ASAP. Engine.dll is in L2.exe's static IAT so it's
+    // already mapped at this point — UNH::Init hasn't run yet, so we
+    // catch the singleton. NWindow.dll may not be loaded yet (lazy load)
+    // — EnsureClientHooks bails gracefully and is retried from RenderFrame.
+    EnsureClientHooksPublic();
+
+    Logf("InstallWorker: sleeping 2s for L2 init to settle (for D3D9 hooks)...");
     Sleep(2000);
     AccountsLoad();
     CoordsLoad();

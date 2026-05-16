@@ -33,15 +33,56 @@ struct ClientProfile {
     uintptr_t rvaExecEulaAgree;            // UUIScript::EulaAgree — EULA closed
     uintptr_t rvaAutoclassNCEulaWnd;       // *UClass for NCEulaWnd (EULA dialog base)
     uintptr_t rvaUUIEventManagerExecuteEvent;  // internal ExecuteEvent(int eventID, FString*)
+    // Char name capture (Essence family). RVAs are in engine.dll, NOT
+    // NWindow.dll. Looked up via GetModuleHandleW(L"engine.dll").
+    uintptr_t rvaEngineUserSetName;        // User::SetName(wchar_t const*) — fires on char-name set
+    uintptr_t rvaEngineRequestEnterWorld;  // UGameEngine::RequestEnterWorld() — "entering world" signal
+    uintptr_t rvaEngineUserGetClassNamePointer; // User::GetClassNamePointer() → wchar_t* MESH name (not real class)
+    // Proper class name lookup (Essence): GetCurrentClassType + GetClassNameW + FName::operator* (Core.dll)
+    uintptr_t rvaEngineUserGetCurrentClassType; // User::GetCurrentClassType() → int
+    uintptr_t rvaEngineUserGetClassNameW;       // User::GetClassNameW(int classType) → FName (returned in EAX:EDX)
+    uintptr_t rvaCoreFNameDeref;                // FName::operator*() → wchar_t* — RVA in Core.dll
+    // Char-select return signal: fires when server confirms /restart (back to char-select)
+    uintptr_t rvaEngineOnRestartResponse;       // UGameEngine::OnRestartResponse
+    uintptr_t rvaEngineSetCurrentClassType;     // User::SetCurrentClassType(int) — fires on class change
 
     // -------- Interlude-only (zero for Essence) ----------------------------
     // All RVAs are inside engine.dll.
     uintptr_t rvaUNHInit;                  // UNetworkHandler::Init — captures singleton this
     uintptr_t rvaUNHRequestAuthLogin;      // UNetworkHandler::RequestAuthLogin (__thiscall)
-    uintptr_t rvaUNHRequestServerLogin;    // UNetworkHandler::RequestServerLogin
+    uintptr_t rvaUNHRequestServerLogin;    // UNetworkHandler::RequestServerLogin (user picked server)
     uintptr_t rvaUNHIsNotYetLogin;         // UNetworkHandler::IsNotYetLogin (state poll)
     uintptr_t rvaUGEAuthSrvSelectOK;       // UGameEngine::OnAuthServerSelectSuccess
     uintptr_t rvaUGEAuthSrvSelectFail;     // UGameEngine::OnAuthServerSelectFail
+    uintptr_t rvaUNHRequestServerList;     // UNetworkHandler::RequestServerList — fires right after auth OK,
+                                           // before the server-list popup opens. This is the "login confirmed" signal.
+    uintptr_t rvaFL2GameDataEulaLoad;      // FL2GameData::EulaLoad — EULA opening
+    uintptr_t rvaUGEOnAcceptLogOut;        // UGameEngine::OnAcceptLogOut — user logged out, back to login
+    uintptr_t rvaUNHAuthReconnect;         // UNetworkHandler::AuthReconnect — auth reconnect (back to login)
+    uintptr_t rvaUL2ConsoleWndSetState;    // UL2ConsoleWnd::SetState(L2ConsoleState) — Interlude UI state machine
+    uintptr_t rvaUL2ConsoleWndExecLobbyEvent; // UL2ConsoleWnd::ExecLobbyEvent(wchar_t*,int) — UScript event dispatcher
+    uintptr_t rvaLegacyShowWindow;         // UWindowHandle::execShowWindow in legacy NWindow.dll (Interlude)
+    uintptr_t rvaLegacyAutoclassNCEulaWnd; // *UClass for NCEulaWnd in legacy NWindow.dll (Interlude)
+    uintptr_t rvaLegacyEventOnEvent;       // UUIScript::eventOnEvent(int, FString const&) in legacy NWindow.dll
+    uintptr_t rvaLegacyUUIAPIShowWindow;   // UUIAPI_WINDOW::execShowWindow in legacy NWindow.dll (alt UI dispatcher)
+    uintptr_t rvaFL2GameDataEulaSave;      // FL2GameData::EulaSave(int) — user clicked Agree(1)/Disagree(0)
+    uintptr_t rvaFL2GameDataNoticeLoad;    // FL2GameData::NoticeLoad — Notice dialog open (candidate for EULA)
+    // Char name capture (Interlude). RVAs in engine.dll, same module as the
+    // existing Interlude hooks.
+    uintptr_t rvaUserSetName;              // User::SetName(wchar_t*) — fires on char-name set
+    uintptr_t rvaUNHRequestEnterWorld;     // UNetworkHandler::RequestEnterWorldPacket — "entering world" signal
+    uintptr_t rvaUserGetClassNamePointer;  // User::GetClassNamePointer() → wchar_t* MESH name (not real class)
+    uintptr_t rvaUserGetCurrentClassType;  // User::GetCurrentClassType() → int (Interlude)
+    uintptr_t rvaUserGetClassNameW;        // User::GetClassNameW(int) → FName  (Interlude)
+    uintptr_t rvaCoreFNameDerefInterlude;  // FName::operator*() → wchar_t* in Interlude's Core.dll
+    uintptr_t rvaUGEOnRestartResponse;     // UGameEngine::OnRestartResponse — back to char-select
+    uintptr_t rvaUGEOnLevelUpdate;         // UGameEngine::OnLevelUpdate(User*, int) — fires on level change (Interlude)
+    uintptr_t rvaUserGetName;              // User::GetName() → wchar_t* — used to fix name after OnLevelUpdate re-bind
+    uintptr_t rvaUL2ResetSelectCharInfo;   // UL2ConsoleWnd::ResetSelectCharacterInfo() — char-select list cleared
+    uintptr_t rvaUL2SelectedCharacterNum;  // UL2ConsoleWnd::SelectedCharacterNum(int slot) — user picked a char
+    uintptr_t rvaUGEOnReceiveCharSelected; // UGameEngine::OnReceiveCharacterSelectedPacket — server confirms char-pick with full info
+    uintptr_t rvaUNHGetUserByID;           // UNetworkHandler::GetUser(int id) → User* — used to enumerate known users
+    uintptr_t rvaLineagePCSetViewTarget;   // ALineagePlayerController::SetViewTarget(AActor*) — fires on local pawn setup
 };
 
 // Builds confirmed by analysis 2026-05-13.
@@ -61,6 +102,14 @@ static const ClientProfile kClientProfiles[] = {
       0,0,0,0,0,0 },
     { L"NWindow.dll", 0x692828e1, "Essence 541 SamuraiCrow", kFamilyEssence,
       0x8770e0, 0x9da350, 0x9eded0, 0x9adfb0, 0x1166e78, 0x9abf00, 0x9b7980, 0x1166e98, 0x961080,
+      0x7a52e0,   // rvaEngineUserSetName              (engine.dll 0x6928282b)
+      0x896c40,   // rvaEngineRequestEnterWorld
+      0x796aa0,   // rvaEngineUserGetClassNamePointer  (mesh — kept for reference, not used)
+      0x0c62f0,   // rvaEngineUserGetCurrentClassType
+      0x7a1cd0,   // rvaEngineUserGetClassNameW
+      0x0114b0,   // rvaCoreFNameDeref                 (Core.dll 0x692827a9)
+      0x71f670,   // rvaEngineOnRestartResponse
+      0x0c6300,   // rvaEngineSetCurrentClassType
       0,0,0,0,0,0 },
     { L"NWindow.dll", 0x69b8ec54, "Essence 557",             kFamilyEssence,
       0x879e50, 0x9ddca0, 0x9f1910, 0x9b10d0, 0x116de90, 0x9af020, 0x9baaa0, 0x116deb0, 0x9641d0,
@@ -72,12 +121,39 @@ static const ClientProfile kClientProfiles[] = {
     // -------- Interlude family (probe engine.dll) --------------------------
     { L"engine.dll", 0x46dbe989, "Lucera TestPatch (Interlude)", kFamilyInterlude,
       0,0,0,0,0,0,0,0,0,                    // no NWindow / EULA / ExecuteEvent RVAs
+      0,0,0,0,0,0,0,0,                      // no Essence engine.dll RVAs (8 fields)
       /*UNHInit*/                0x3ab2,
       /*UNHRequestAuthLogin*/    0x5060,
       /*UNHRequestServerLogin*/  0xbb04,
       /*UNHIsNotYetLogin*/       0x113b0,
       /*UGEAuthSrvSelectOK*/     0x4ec1,
-      /*UGEAuthSrvSelectFail*/   0xba41 },
+      /*UGEAuthSrvSelectFail*/   0xba41,
+      /*UNHRequestServerList*/   0x409d,
+      /*FL2GameDataEulaLoad*/    0x6c76,
+      /*UGEOnAcceptLogOut*/      0x11e5,
+      /*UNHAuthReconnect*/       0x905c,
+      /*UL2ConsoleWndSetState*/  0xe6a6,
+      /*UL2ConsoleWndExecLobbyEvent*/ 0x2bdf,
+      /*LegacyShowWindow*/       0x132580,   // in legacy NWindow.dll (timestamp 0x46775bd3)
+      /*LegacyAutoclassNCEulaWnd*/ 0x352610,
+      /*LegacyEventOnEvent*/     0x07f210,
+      /*LegacyUUIAPIShowWindow*/ 0x1120e0,
+      /*FL2GameDataEulaSave*/    0x00ed09,
+      /*FL2GameDataNoticeLoad*/  0x0098bd,
+      /*UserSetName*/            0x000072f7,
+      /*UNHRequestEnterWorld*/   0x0000da17,
+      /*UserGetClassNamePointer*/ 0x00014f74,
+      /*UserGetCurrentClassType*/ 0,           // not separately needed — GetClassNameW takes no args
+      /*UserGetClassNameW*/      0x000102df,
+      /*CoreFNameDerefInterlude*/ 0x000012c1,  // Core.dll
+      /*UGEOnRestartResponse*/   0x000141f5,
+      /*UGEOnLevelUpdate*/       0x00002176,
+      /*UserGetName*/            0x000106d6,
+      /*UL2ResetSelectCharInfo*/ 0x00014fce,
+      /*UL2SelectedCharacterNum*/ 0x0001082a,
+      /*UGEOnReceiveCharSelected*/ 0x00007e14,
+      /*UNHGetUserByID*/         0x00011554,
+      /*LineagePCSetViewTarget*/ 0x0000a4c0 },
 };
 
 // Read a loaded module's IMAGE_NT_HEADERS.TimeDateStamp.
