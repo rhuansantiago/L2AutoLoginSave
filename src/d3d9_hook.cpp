@@ -46,6 +46,16 @@ using Present_t  = HRESULT(__stdcall*)(IDirect3DDevice9*,
 
 EndScene_t  g_origEndScene   = nullptr;
 EndScene_t  g_origEndSceneEx = nullptr;
+
+// IDirect3D9::CreateDevice — the factory's device-creation method. Hooked
+// so we can release ImGui's DX9 refs on the OLD device before a new one is
+// created (some L2 Interlude paths fail with D3DERR_DEVICELOST when the
+// old device's refcount is still elevated by our resources).
+using CreateDevice_t = HRESULT (__stdcall*)(
+    IDirect3D9* This, UINT Adapter, D3DDEVTYPE DeviceType,
+    HWND hFocusWindow, DWORD BehaviorFlags,
+    D3DPRESENT_PARAMETERS* pp, IDirect3DDevice9** ppDev);
+CreateDevice_t g_origCreateDevice = nullptr;
 Reset_t     g_origReset      = nullptr;
 Reset_t     g_origResetEx    = nullptr;
 Present_t   g_origPresent    = nullptr;
@@ -1212,6 +1222,18 @@ LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    // Interlude only: block Alt+Enter (the engine's ToggleFullscreen hook
+    // path). UD3DRenderDevice::SetRes on this 2007 client can't recover
+    // device destroy+recreate on modern Windows + GPU drivers — leaves a
+    // zombie window or freezes input. Easier to prevent than to repair.
+    // Essence handles this correctly so we don't block there.
+    if (g_profile && g_profile->family == kFamilyInterlude) {
+        if ((msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) &&
+            wp == VK_RETURN) {
+            return 0;  // swallow Alt+Enter
+        }
+    }
+
     // System-key messages (Alt held, Alt+Enter, F10, etc) are game/system
     // shortcuts. Don't feed them to ImGui — otherwise Alt highlights the
     // window's close 'x' via nav and Enter then closes the overlay. These
@@ -2343,6 +2365,69 @@ HRESULT __stdcall HookResetEx(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) 
     return hr;
 }
 
+// Fires when the engine destroys the current device and asks d3d9 to make
+// a new one (UD3DRenderDevice::UnSetRes followed by CreateDevice — the
+// Alt+Enter exit-fullscreen path on L2 Interlude). Two jobs:
+//   1) Tear down ImGui's DX9 backend so the OLD device's refcount can drop
+//      to 0 and it's fully destroyed. Otherwise the new CreateDevice can
+//      return D3DERR_DEVICELOST on some drivers (RTX + Win10 reproduces).
+//   2) Retry on transient D3DERR_DEVICELOST with a short Sleep — sometimes
+//      the GPU just needs ~150ms after the fullscreen mode switch settles.
+HRESULT __stdcall HookCreateDevice(IDirect3D9* This, UINT Adapter, D3DDEVTYPE DeviceType,
+    HWND hFocusWindow, DWORD BehaviorFlags,
+    D3DPRESENT_PARAMETERS* pp, IDirect3DDevice9** ppDev) {
+    Logf("HookCreateDevice called (imguiReady=%d Fullscreen=%d w=%u h=%u hwnd=%p)",
+         (int)g_imguiReady, pp ? (int)(!pp->Windowed) : -1,
+         pp ? pp->BackBufferWidth : 0, pp ? pp->BackBufferHeight : 0, hFocusWindow);
+
+    // Capture the host hwnd before we tear ImGui down — used below to hide
+    // the stale window if the engine creates the new device on a NEW hwnd
+    // and leaves the old fullscreen window visible as a zombie.
+    HWND staleHwnd = g_hostHwnd;
+
+    // Drop ImGui's refs on the OLD device so its refcount can reach 0.
+    if (g_imguiReady) {
+        if (g_hostHwnd && g_origWndProc) {
+            SetWindowLongPtrW(g_hostHwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
+            g_origWndProc = nullptr;
+        }
+        ImGui_ImplDX9_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        g_imguiReady = false;
+        s_initializedDev = nullptr;
+        Logf("HookCreateDevice: tore down ImGui to release old device refs");
+    }
+
+    HRESULT hr = g_origCreateDevice(This, Adapter, DeviceType, hFocusWindow,
+                                    BehaviorFlags, pp, ppDev);
+    Logf("HookCreateDevice: original returned 0x%08x", hr);
+
+    // Retry on transient DEVICELOST. Reported by users on RTX 3070 + Win10
+    // when exiting fullscreen via Alt+Enter — the GPU needs a moment.
+    int retries = 0;
+    while (hr == D3DERR_DEVICELOST && retries < 5) {
+        Sleep(150);
+        retries++;
+        hr = g_origCreateDevice(This, Adapter, DeviceType, hFocusWindow,
+                                BehaviorFlags, pp, ppDev);
+        Logf("HookCreateDevice: retry %d returned 0x%08x", retries, hr);
+    }
+
+    // If the engine created the new device on a DIFFERENT hwnd than the
+    // one ImGui was bound to (typical of Interlude fullscreen toggle —
+    // it creates a fresh window for each mode), hide the stale window
+    // so the user doesn't see a zombie copy. SW_HIDE is safe: just makes
+    // it invisible without destroying it (engine can still clean up).
+    if (SUCCEEDED(hr) && staleHwnd && staleHwnd != hFocusWindow &&
+        IsWindow(staleHwnd)) {
+        ShowWindow(staleHwnd, SW_HIDE);
+        Logf("HookCreateDevice: hid stale window %p (engine moved to %p)",
+             staleHwnd, hFocusWindow);
+    }
+    return hr;
+}
+
 // Periodic watchdog: log call counts. With MinHook the patches are on the
 // FUNCTION CODE in d3d9.dll (.text), shared across all devices. If counts
 // stay at zero after several seconds, L2 isn't using d3d9.dll's standard
@@ -2427,6 +2512,16 @@ void D3D9HookInstall() {
     IDirect3D9* d3d = pDirect3DCreate9(D3D_SDK_VERSION);
     if (!d3d) { Logf("D3D9HookInstall: Direct3DCreate9 failed"); return; }
 
+    // IDirect3D9::CreateDevice is at vtable slot 16 (after IUnknown 0-2 +
+    // IDirect3D9 methods 3..15). Capture its address before we Release the
+    // factory — the vtable lives in d3d9.dll's data and survives Release.
+    void* d3dFactoryCreateDevice = nullptr;
+    {
+        void** vtbl = *(void***)d3d;
+        d3dFactoryCreateDevice = vtbl[16];
+    }
+    Logf("D3D9HookInstall: IDirect3D9::CreateDevice @ %p", d3dFactoryCreateDevice);
+
     void *reset = nullptr, *present = nullptr, *endScene = nullptr;
     if (!ReadDeviceVtableSlots(false, d3d, &reset, &present, &endScene)) {
         d3d->Release();
@@ -2469,6 +2564,8 @@ void D3D9HookInstall() {
     hookOne(endScene, (void*)&HookEndScene, (void**)&g_origEndScene, "Device9::EndScene");
     hookOne(present,  (void*)&HookPresent,  (void**)&g_origPresent,  "Device9::Present");
     hookOne(reset,    (void*)&HookReset,    (void**)&g_origReset,    "Device9::Reset");
+    hookOne(d3dFactoryCreateDevice, (void*)&HookCreateDevice,
+            (void**)&g_origCreateDevice, "IDirect3D9::CreateDevice");
 
     // Device9Ex: only hook if different from Device9. If the same function
     // implements both (some d3d9.dll versions share), the Device9 hook
