@@ -12,41 +12,51 @@ timestamp picks the right RVA table (see `src/client_profiles.h`).
 
 ## Install
 
-`l2ui.dll` is loaded into `L2.exe` via an IAT entry pointing at the
-named export `L2UI_Init`. One-time setup per install.
+`l2ui.dll` is loaded into the L2 process via an IAT entry on
+**`Engine.dll`** (NOT `L2.exe`). One-time setup per install.
+
+### Why Engine.dll instead of L2.exe
+
+L2.exe is Themida-protected. Modifying its IAT triggers Themida's
+anti-tamper checks, which on Interlude clients corrupt the D3D9
+device-recreation path — Alt+Enter (or in-game resolution changes)
+fails with `D3DERR_DEVICELOST`, leaving the game frozen or with a
+zombie window.
+
+`Engine.dll` is **not** Themida-protected. L2.exe imports Engine.dll
+naturally, so when Windows loads L2.exe → Engine.dll → Engine.dll's
+IAT triggers → our DLL loads. Same effect, no Themida detection.
 
 ### Steps
 
 1. **Download CFF Explorer** if you don't have it.
    https://ntcore.com/?page_id=388 (free, by NTCore / Daniel Pistelli).
-2. **Backup L2.exe**:
+2. **Backup Engine.dll**:
    ```
-   copy "System_en\L2.exe" "System_en\L2.exe.original"
+   copy "System_en\Engine.dll" "System_en\Engine.dll.original"
    ```
-3. **Open** `System_en\L2.exe` in CFF Explorer.
-4. In the left tree, click **Import Adder**.
-5. In the right pane, hit **Add** in the bottom-left and choose
-   `l2ui.dll` (drop it in `System_en` first if it isn't there yet — the
-   build script puts it there by default).
-6. With `l2ui.dll` row selected, in the function box on the right type
+3. Drop `l2ui.dll` into the L2 `System_en` folder (the build script
+   puts it there by default).
+4. **Open** `System_en\Engine.dll` in CFF Explorer.
+5. In the left tree, click **Import Adder**.
+6. In the right pane, hit **Add** in the bottom-left and choose
+   `l2ui.dll`.
+7. With `l2ui.dll` row selected, in the function box on the right type
    `L2UI_Init` and click **+ Add**.
-7. Click **Rebuild Import Table**. CFF Explorer shows a confirmation.
-8. **File → Save** (overwrites L2.exe — that's why we backed it up).
-9. Make sure `System_en\l2ui.dll` exists alongside L2.exe.
+8. Click **Rebuild Import Table**. CFF Explorer shows a confirmation.
+9. **File → Save** (overwrites Engine.dll — that's why we backed it up).
 10. Launch L2.exe normally.
 
-Python alternative for step 3–8: `python add_import.py L2.exe` (uses
-`pefile`).
+Python alternative for steps 4–9:
+`python add_import.py Engine.dll` (uses `pefile`).
 
 ### Caveats
 
-- **L2.exe is Themida-protected**. Some Themida configurations refuse
-  to run a modified L2.exe. If the game silently exits, revert:
-  ```
-  copy "System_en\L2.exe.original" "System_en\L2.exe"
-  ```
-  All Essence / Lucera Classic builds tested so far accept the IAT
-  addition.
+- If something goes wrong, revert: `copy Engine.dll.original Engine.dll`.
+- Don't modify L2.exe — Themida will break Alt+Enter exit-fullscreen
+  on Interlude builds and may degrade other behavior even on Essence.
+- All Essence / Classic / Interlude builds we tested accept the
+  Engine.dll IAT addition.
 
 ---
 

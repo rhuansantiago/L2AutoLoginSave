@@ -1222,18 +1222,6 @@ LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
-    // Interlude only: block Alt+Enter (the engine's ToggleFullscreen hook
-    // path). UD3DRenderDevice::SetRes on this 2007 client can't recover
-    // device destroy+recreate on modern Windows + GPU drivers — leaves a
-    // zombie window or freezes input. Easier to prevent than to repair.
-    // Essence handles this correctly so we don't block there.
-    if (g_profile && g_profile->family == kFamilyInterlude) {
-        if ((msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) &&
-            wp == VK_RETURN) {
-            return 0;  // swallow Alt+Enter
-        }
-    }
-
     // System-key messages (Alt held, Alt+Enter, F10, etc) are game/system
     // shortcuts. Don't feed them to ImGui — otherwise Alt highlights the
     // window's close 'x' via nav and Enter then closes the overlay. These
@@ -2414,16 +2402,48 @@ HRESULT __stdcall HookCreateDevice(IDirect3D9* This, UINT Adapter, D3DDEVTYPE De
         Logf("HookCreateDevice: retry %d returned 0x%08x", retries, hr);
     }
 
-    // If the engine created the new device on a DIFFERENT hwnd than the
-    // one ImGui was bound to (typical of Interlude fullscreen toggle —
-    // it creates a fresh window for each mode), hide the stale window
-    // so the user doesn't see a zombie copy. SW_HIDE is safe: just makes
-    // it invisible without destroying it (engine can still clean up).
-    if (SUCCEEDED(hr) && staleHwnd && staleHwnd != hFocusWindow &&
-        IsWindow(staleHwnd)) {
-        ShowWindow(staleHwnd, SW_HIDE);
-        Logf("HookCreateDevice: hid stale window %p (engine moved to %p)",
-             staleHwnd, hFocusWindow);
+    // Hide stale windows: after CreateDevice success, the Interlude engine
+    // sometimes leaves the previous mode's HWND visible as a zombie. Scan
+    // all top-level windows of this process and hide any visible one that
+    // isn't the new hFocusWindow. Safe — just SW_HIDE, doesn't destroy.
+    if (SUCCEEDED(hr) && hFocusWindow) {
+        struct EnumCtx { HWND keep; DWORD pid; int hidden; };
+        EnumCtx ctx = { hFocusWindow, GetCurrentProcessId(), 0 };
+        auto enumProc = [](HWND hwnd, LPARAM lp) -> BOOL {
+            EnumCtx* c = (EnumCtx*)lp;
+            if (hwnd == c->keep) return TRUE;
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid != c->pid) return TRUE;
+            if (!IsWindowVisible(hwnd)) return TRUE;
+            // Only target windows that LOOK like main game windows: have a
+            // non-zero size and a known L2 title or class.
+            RECT r = {};
+            GetWindowRect(hwnd, &r);
+            int w = r.right - r.left, h = r.bottom - r.top;
+            if (w < 100 || h < 100) return TRUE;  // skip tooltips/popups
+            wchar_t title[128] = {};
+            GetWindowTextW(hwnd, title, _countof(title));
+            wchar_t cls[64] = {};
+            GetClassNameW(hwnd, cls, _countof(cls));
+            // Heuristic: hide visible windows that look like our game
+            // (Lineage / L2 in title or class). Avoid hiding random
+            // siblings (Discord, browser, etc that share PID via Steam etc).
+            bool looksLikeGame =
+                wcsstr(title, L"Lineage") || wcsstr(title, L"L2") ||
+                wcsstr(cls,   L"L2")      || wcsstr(cls,   L"Lineage") ||
+                wcsstr(cls,   L"WindowsViewport");
+            if (looksLikeGame) {
+                ShowWindow(hwnd, SW_HIDE);
+                c->hidden++;
+            }
+            return TRUE;
+        };
+        EnumWindows(enumProc, (LPARAM)&ctx);
+        if (ctx.hidden > 0) {
+            Logf("HookCreateDevice: hid %d stale L2 window(s); keeping %p",
+                 ctx.hidden, hFocusWindow);
+        }
     }
     return hr;
 }
