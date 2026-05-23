@@ -1,98 +1,189 @@
-# hollow L2 overlay
+# L2AutoLoginSave
 
-In-game ImGui overlay rendered inside L2's D3D9 framebuffer. Provides a
-saved-account login UI that calls the native `AuthLogin` directly
-(bypassing the L2 client's own login form), with per-install
-credential storage encrypted via DPAPI.
+In-game saved-account login UI for Lineage II clients. Drop-in DLL
+that renders an ImGui panel inside the L2 client's D3D9 frame, lets
+you store credentials per-install (DPAPI-encrypted) and dispatches
+the native `AuthLogin` path directly — no scripted clicks on the
+client's own login form.
 
-Supports multiple L2 builds — runtime detection by NWindow.dll's PE
-timestamp picks the right RVA table (see `src/client_profiles.h`).
-
----
-
-## Install
-
-`l2ui.dll` is loaded into the L2 process via an IAT entry on
-**`Engine.dll`** (NOT `L2.exe`). One-time setup per install.
-
-### Why Engine.dll instead of L2.exe
-
-L2.exe is Themida-protected. Modifying its IAT triggers Themida's
-anti-tamper checks, which on Interlude clients corrupt the D3D9
-device-recreation path — Alt+Enter (or in-game resolution changes)
-fails with `D3DERR_DEVICELOST`, leaving the game frozen or with a
-zombie window.
-
-`Engine.dll` is **not** Themida-protected. L2.exe imports Engine.dll
-naturally, so when Windows loads L2.exe → Engine.dll → Engine.dll's
-IAT triggers → our DLL loads. Same effect, no Themida detection.
-
-### Steps
-
-1. **Download CFF Explorer** if you don't have it.
-   https://ntcore.com/?page_id=388 (free, by NTCore / Daniel Pistelli).
-2. **Backup Engine.dll**:
-   ```
-   copy "System_en\Engine.dll" "System_en\Engine.dll.original"
-   ```
-3. Drop `l2ui.dll` into the L2 `System_en` folder (the build script
-   puts it there by default).
-4. **Open** `System_en\Engine.dll` in CFF Explorer.
-5. In the left tree, click **Import Adder**.
-6. In the right pane, hit **Add** in the bottom-left and choose
-   `l2ui.dll`.
-7. With `l2ui.dll` row selected, in the function box on the right type
-   `L2UI_Init` and click **+ Add**.
-8. Click **Rebuild Import Table**. CFF Explorer shows a confirmation.
-9. **File → Save** (overwrites Engine.dll — that's why we backed it up).
-10. Launch L2.exe normally.
-
-Python alternative for steps 4–9:
-`python add_import.py Engine.dll` (uses `pefile`).
-
-### Caveats
-
-- If something goes wrong, revert: `copy Engine.dll.original Engine.dll`.
-- Don't modify L2.exe — Themida will break Alt+Enter exit-fullscreen
-  on Interlude builds and may degrade other behavior even on Essence.
-- All Essence / Classic / Interlude builds we tested accept the
-  Engine.dll IAT addition.
+**🇧🇷 Versão em português:** [README.pt-BR.md](README.pt-BR.md)
 
 ---
 
-## Verifying it loaded
+## ⚠️ Disclaimer
 
-Log file at `%LOCALAPPDATA%\hollow_l2_overlay\overlay.log`:
-```
-[ATTACH] pid=...
-host exe : ...System_en\L2.exe
-self dll : ...System_en\l2ui.dll
-EnsureNWindowHooks: matched profile '<build name>' (ts=0x...)
-MH hook installed (lazy): NWindow!execGotoLogin @ ...
-...
-```
+This project is **not affiliated with, endorsed by, or sponsored by
+NCSoft**. "Lineage II" is a trademark of NCSoft Corporation.
 
-If you see `UNKNOWN NWindow build (TimeDateStamp=0x...)`, the build
-isn't in the profile table yet — run `notes/analyze_nwindow.ps1` on
-that NWindow.dll and add the row to `client_profiles.h`.
+This software is intended **exclusively for use on private servers**
+that you operate or are authorized to participate in. Using it on
+official NCSoft servers may violate their Terms of Service. The
+authors take no responsibility for accounts, characters, or actions
+taken by third parties using this software.
+
+The repository contains **no copyrighted game assets** — no L2
+textures, audio, or game data is redistributed. The DLL hooks into
+client DLLs at runtime by RVA; build profiles for additional clients
+are contributed as PE TimeDateStamps + offset tables.
+
+Use at your own risk.
 
 ---
 
-## Files
+## Features
+
+- **Saved-account login** — credentials encrypted per Windows user
+  via DPAPI (`CryptProtectData`). No plaintext file on disk.
+- **Native login dispatch** — calls the client's internal
+  `AuthLogin` directly (Essence) or invokes `UNetworkHandler::RequestAuthLogin`
+  via __thiscall (Interlude). No fake mouse clicks, no input
+  injection.
+- **EULA auto-accept** — recognizes the EULA dialog opening (per-build
+  signal) and closes it programmatically.
+- **Window title** — patches the L2 window title to show character
+  name / class / level on Essence clients. (Interlude name capture
+  is limited — see [docs/USAGE.md](docs/USAGE.md).)
+- **Multi-client** — picks the right RVA table at runtime from the
+  PE TimeDateStamp of NWindow.dll (Essence) or engine.dll
+  (Interlude). One DLL binary works across all supported builds.
+- **Themida-safe** — injects via Engine.dll's IAT, never modifies
+  L2.exe (which is Themida-protected and breaks on tamper).
+
+## Supported builds
+
+| Family | Build | Probe DLL | TimeDateStamp |
+|--------|-------|-----------|---------------|
+| Essence | 474 | NWindow.dll | `0x6708d7c8` |
+| Essence | 509 | NWindow.dll | `0x678f9987` |
+| Essence | Assassins | NWindow.dll | `0x6422e278` |
+| Essence | 520 RoseVein | NWindow.dll | `0x68394700` |
+| Essence | 541 SamuraiCrow | NWindow.dll | `0x692828e1` |
+| Essence | 557 | NWindow.dll | `0x69b8ec54` |
+| Essence (Lucera) | Classic | NWindow.dll | `0x5cb5b1d2` |
+| Interlude (Lucera) | TestPatch | engine.dll | `0x46dbe989` |
+
+If your build isn't listed, the DLL still loads but logs
+`UNKNOWN NWindow build` — add a row to `src/client_profiles.h` with
+the matching RVAs. See [docs/USAGE.md §troubleshooting](docs/USAGE.md).
+
+## Quick start
+
+If you just want to run it:
+
+```bat
+:: Build (needs VS2022 + CMake 3.20+)
+cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
+cmake --build build --config Release
+
+:: Output: build/Release/l2ui.dll  (~150 KB)
+
+:: Install (one-time per L2 install)
+copy "L2\System_en\Engine.dll" "L2\System_en\Engine.dll.original"
+copy build\Release\l2ui.dll  "L2\System_en\"
+python add_import.py "L2\System_en\Engine.dll"
+
+:: Launch L2 normally — the overlay panel appears on the login screen
+```
+
+Full step-by-step guides:
+
+- 🇺🇸 [**docs/BUILDING.md**](docs/BUILDING.md) — compile from source
+- 🇺🇸 [**docs/USAGE.md**](docs/USAGE.md) — install, configure, use
+- 🇧🇷 [**docs/BUILDING.pt-BR.md**](docs/BUILDING.pt-BR.md) — guia de compilação
+- 🇧🇷 [**docs/USAGE.pt-BR.md**](docs/USAGE.pt-BR.md) — guia de uso
+
+## How it works
 
 ```
-overlay/
-├── CMakeLists.txt
-├── README.md
-├── add_import.py             ← Python alternative to CFF Explorer's
-│                               Import Adder
+┌─────────────┐   IAT redir   ┌───────────────┐   D3D9 EndScene   ┌──────────┐
+│  L2.exe     │──────────────►│  Engine.dll   │───────────────────►│ l2ui.dll │
+│ (Themida)   │  (untouched)  │  (untouched)  │   MinHook trampo  │  overlay │
+└─────────────┘               └───────────────┘                   └──────────┘
+                                                                       │
+                                                                       │ AuthLogin call
+                                                                       │ (FunctionPtr by RVA)
+                                                                       ▼
+                                                                  ┌──────────┐
+                                                                  │ NWindow  │
+                                                                  │   .dll   │
+                                                                  └──────────┘
+```
+
+- A single `L2UI_Init` export is added to Engine.dll's import table
+  via CFF Explorer or the bundled Python script. Windows resolves
+  the import when Engine.dll loads, which triggers DllMain → our
+  hooks install.
+- D3D9 `EndScene` / `Present` / `Reset` are hooked with MinHook to
+  drive the ImGui frame inside the client's existing back buffer.
+- The login button calls the client's internal `AuthLogin` routine
+  through a function pointer resolved by RVA at the matched build's
+  profile entry. No script side-channel.
+
+## Project layout
+
+```
+.
+├── LICENSE                  MIT
+├── README.md                this file (English)
+├── README.pt-BR.md          Portuguese version
+├── docs/
+│   ├── BUILDING.md          build guide (EN)
+│   ├── BUILDING.pt-BR.md    guia de compilação
+│   ├── USAGE.md             usage guide (EN)
+│   └── USAGE.pt-BR.md       guia de uso
+├── CMakeLists.txt           top-level build
+├── add_import.py            CFF Explorer alternative (pefile-based)
 └── src/
-    ├── dllmain.cpp           ← DllMain, Logf, L2UI_Init export
-    ├── d3d9_hook.cpp         ← D3D9 + NWindow hooks, ImGui frame
-    ├── overlay_ui.cpp        ← account storage (DPAPI + per-install)
+    ├── dllmain.cpp          DllMain, Logf, L2UI_Init export
+    ├── d3d9_hook.cpp        D3D9 + NWindow hooks, ImGui frame
+    ├── overlay_ui.cpp       account storage (DPAPI per-install)
     ├── overlay_ui.h
-    ├── client_profiles.h     ← per-build RVA table
-    └── exports.def           ← module exports list
+    ├── client_profiles.h    per-build RVA table
+    └── exports.def          module exports list
 ```
 
-Build artifact: `build/overlay/Release/l2ui.dll` (~150 KB).
+## Tech stack
+
+| Component | Library | License |
+|-----------|---------|---------|
+| Overlay | [Dear ImGui](https://github.com/ocornut/imgui) v1.91.0 | MIT |
+| Hooking | [MinHook](https://github.com/TsudaKageyu/minhook) | BSD-2-Clause |
+| Render | Win32 D3D9 (system) | — |
+| Credentials | Win32 DPAPI (system) | — |
+
+All bundled deps are permissively licensed. No GPL.
+
+## Status
+
+| Feature | Status |
+|---------|--------|
+| Multi-client RVA routing | ✅ |
+| DPAPI-encrypted credentials | ✅ |
+| Essence native AuthLogin dispatch | ✅ |
+| Interlude UNetworkHandler dispatch | ✅ |
+| EULA auto-accept | ✅ |
+| Window title (Essence) | ✅ |
+| Window title (Lucera Interlude) | ❌ accepted limitation (see USAGE) |
+| D3D9 device-recreate survival | ✅ |
+
+## Contributing
+
+PRs welcome. To add a new build:
+
+1. Run `notes/analyze_nwindow.ps1` on the target NWindow.dll (or
+   engine.dll for Interlude) — it will print the TimeDateStamp and
+   a starting set of RVAs.
+2. Add a row to `src/client_profiles.h`.
+3. Test, then open a PR with the build identification + a brief
+   note on which RVAs you had to fix up.
+
+For larger changes, please open an issue first to discuss scope.
+The codebase mixes English and Portuguese comments — English is
+preferred for new code.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Bundled dependencies (ImGui, MinHook) retain their respective
+permissive licenses.
