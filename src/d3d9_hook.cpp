@@ -782,12 +782,12 @@ static HRESULT __stdcall hkEndScene(IDirect3DDevice9* device) {
     if (!g_imguiReady) {
         return ((EndScene_t)g_origEndScene)(device);
     }
-        if (!g_hostHwnd) {
-        D3DPRESENT_PARAMETERS pp;
-        ZeroMemory(&pp, sizeof(pp));
-        __try { device->GetPresentParameters(&pp); }
-        __except(EXCEPTION_EXECUTE_HANDLER) { return ((EndScene_t)g_origEndScene)(device); }
-        g_hostHwnd = pp.hDeviceWindow;
+    if (!g_hostHwnd) {
+        // ✅ Usa GetForegroundWindow() — função REAL do Windows
+        HWND hWnd = GetForegroundWindow();
+        if (hWnd) {
+            g_hostHwnd = hWnd;
+        }
     }
     if (!g_imguiReady && g_hostHwnd) {
         ImGui_ImplDX9_Init(device);
@@ -803,6 +803,9 @@ static HRESULT __stdcall hkEndScene(IDirect3DDevice9* device) {
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
     return ((EndScene_t)g_origEndScene)(device);
 }
+        Logf("ImGui pronto — janela do L2 capturada");
+    }
+
 static HRESULT __stdcall hkReset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     if (g_imguiReady) {
         ImGui_ImplDX9_Shutdown();
