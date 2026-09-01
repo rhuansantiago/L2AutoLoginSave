@@ -324,21 +324,163 @@ void OverlayInstall() {
         Logf("OverlayInstall: CreateThread failed err=%lu", GetLastError());
     }
 }
+// =========================================================================
+//             NOVA INTERFACE — Estilo Interlude Dourado
+// =========================================================================
+
+static int   g_selectedSlot = -1;
+static bool  g_showPassword = false;
+static bool  g_autoLogin = false;
+static char  g_editLogin[64] = "";
+static wchar_t g_editPassW[128] = L"";
+
 void BuildOverlayUI() {
-    // Set ImGui window properties
-    ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
-    
-    if (ImGui::Begin("L2 Account Manager", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        // Add your ImGui UI code here
-        // Example: account selection, login button, etc.
-        ImGui::Text("Account slots:");
+    // === ESTILO — Tema dourado igual a imagem ===
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 12.0f;
+    style.FrameRounding = 6.0f;
+    style.Colors[ImGuiCol_WindowBg]        = ImVec4(0.06f, 0.08f, 0.15f, 0.96f);
+    style.Colors[ImGuiCol_Border]          = ImVec4(0.85f, 0.70f, 0.20f, 1.00f);
+    style.Colors[ImGuiCol_BorderShadow]    = ImVec4(0.40f, 0.30f, 0.10f, 0.50f);
+    style.Colors[ImGuiCol_TitleBg]         = ImVec4(0.10f, 0.08f, 0.05f, 1.00f);
+    style.Colors[ImGuiCol_TitleBgActive]   = ImVec4(0.15f, 0.12f, 0.08f, 1.00f);
+    style.Colors[ImGuiCol_TitleText]       = ImVec4(1.00f, 0.85f, 0.30f, 1.00f);
+    style.Colors[ImGuiCol_FrameBg]         = ImVec4(0.12f, 0.15f, 0.22f, 1.00f);
+    style.Colors[ImGuiCol_FrameBgHovered]  = ImVec4(0.18f, 0.20f, 0.30f, 1.00f);
+    style.Colors[ImGuiCol_FrameBgActive]   = ImVec4(0.08f, 0.10f, 0.18f, 1.00f);
+    style.Colors[ImGuiCol_Button]          = ImVec4(0.20f, 0.35f, 0.60f, 1.00f);
+    style.Colors[ImGuiCol_ButtonHovered]   = ImVec4(0.30f, 0.50f, 0.85f, 1.00f);
+    style.Colors[ImGuiCol_ButtonActive]    = ImVec4(0.15f, 0.25f, 0.45f, 1.00f);
+    style.Colors[ImGuiCol_Button]          = ImVec4(0.22f, 0.38f, 0.65f, 1.00f);
+    style.Colors[ImGuiCol_ButtonHovered]   = ImVec4(0.35f, 0.55f, 0.90f, 1.00f);
+    style.Colors[ImGuiCol_ButtonActive]    = ImVec4(0.12f, 0.22f, 0.42f, 1.00f);
+    style.Colors[ImGuiCol_Text]            = ImVec4(0.95f, 0.90f, 0.80f, 1.00f);
+    style.Colors[ImGuiCol_TextSelectedBg]  = ImVec4(0.85f, 0.70f, 0.20f, 0.35f);
+    style.Colors[ImGuiCol_CheckMark]       = ImVec4(1.00f, 0.85f, 0.30f, 1.00f);
+
+    // === TAMANHO E POSIÇÃO ===
+    ImGui::SetNextWindowPos(ImVec2(100, 80), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(420, 460), ImGuiCond_FirstUseEver);
+
+    // === JANELA PRINCIPAL ===
+    if (ImGui::Begin("AUTO LOGIN", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) {
+
+        // Título centralizado dourado
+        float tw = ImGui::CalcTextSize("AUTO LOGIN").x;
+        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - tw) * 0.5f);
+        ImGui::TextColored(ImVec4(1.00f, 0.85f, 0.30f, 1.00f), "AUTO LOGIN");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // === LISTA DE CONTAS SALVAS ===
+        ImGui::Text("Contas salvas:");
+        ImGui::BeginChild("ListaContas", ImVec2(-1, 160), true);
         for (int i = 0; i < kNumSlots; i++) {
             Account& acc = AccountsGet(i);
-            if (!acc.empty()) {
-                ImGui::BulletText("Slot %d: %ls", i + 1, acc.user.c_str());
+            if (acc.empty()) continue;
+
+            char label[128];
+            snprintf(label, sizeof(label), "%d. %ls", i + 1, acc.user.c_str());
+
+            // Clique simples = preenche campos
+            if (ImGui::Selectable(label, g_selectedSlot == i)) {
+                g_selectedSlot = i;
+                // Preenche login
+                WideCharToMultiByte(CP_UTF8, 0, acc.user.c_str(), -1, g_editLogin, sizeof(g_editLogin), nullptr, nullptr);
+                // Descriptografa senha pro campo de edição
+                g_editPassW = DpapiUnprotect(acc.passBlob);
+                g_showPassword = false;
+            }
+
+            // Botão EXCLUIR (X)
+            ImGui::SameLine(ImGui::GetWindowWidth() - 40);
+            char btnDel[16];
+            snprintf(btnDel, sizeof(btnDel), "X##del%d", i);
+            if (ImGui::SmallButton(btnDel)) {
+                g_slots[i] = {};
+                AccountsSave();
+                if (g_selectedSlot == i) {
+                    g_selectedSlot = -1;
+                    memset(g_editLogin, 0, sizeof(g_editLogin));
+                    g_editPassW.clear();
+                }
             }
         }
+        ImGui::EndChild();
+        ImGui::Spacing(); ImGui::Spacing();
+
+        // === CAMPO LOGIN ===
+        ImGui::Text(" 👤"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(320);
+        if (ImGui::InputText("##login", g_editLogin, sizeof(g_editLogin))) {
+            // Campo editado
+        }
+        ImGui::Spacing();
+
+        // === CAMPO SENHA ===
+        ImGui::Text(" 🔒"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(270);
+        static char passShow[128] = "";
+        if (g_showPassword) {
+            // Mostra senha em texto
+            WideCharToMultiByte(CP_UTF8, 0, g_editPassW.c_str(), -1, passShow, sizeof(passShow), nullptr, nullptr);
+            if (ImGui::InputText("##senha_show", passShow, sizeof(passShow))) {
+                MultiByteToWideChar(CP_UTF8, 0, passShow, -1, &g_editPassW[0], (int)g_editPassW.size() + 1);
+            }
+        } else {
+            // Senha mascarada
+            static char passMask[128] = "";
+            memset(passMask, 0, sizeof(passMask));
+            for (size_t j = 0; j < g_editPassW.size() && j < 64; j++) passMask[j] = '*';
+            ImGui::InputText("##senha_mask", passMask, sizeof(passMask), ImGuiInputTextFlags_Password);
+        }
+        // Botão OLHINHO mostrar/esconder senha
+        ImGui::SameLine();
+        if (ImGui::Button(g_showPassword ? " 🙈" : " 👁️")) {
+            g_showPassword = !g_showPassword;
+        }
+        ImGui::Spacing(); ImGui::Spacing();
+
+        // === CHECKBOX: Entrar automaticamente ===
+        ImGui::SetCursorPosX(40);
+        ImGui::Checkbox(" Entrar automaticamente", &g_autoLogin);
+        ImGui::Spacing(); ImGui::Spacing();
+
+        // === BOTÕES: LOG IN e EXIT ===
+        float btnLargura = 170.0f;
+        ImGui::SetCursorPosX(30);
+
+        // Botão SALVAR / LOG IN
+        if (ImGui::Button("  LOG IN  ", ImVec2(btnLargura, 45))) {
+            // Procurar slot vazio ou usar o selecionado
+            int slot = g_selectedSlot;
+            if (slot < 0) {
+                for (int i = 0; i < kNumSlots; i++) {
+                    if (g_slots[i].empty()) { slot = i; break; }
+                }
+            }
+            if (slot >= 0 && slot < kNumSlots && g_editLogin[0]) {
+                // Salva conta
+                g_slots[slot].user.clear();
+                MultiByteToWideChar(CP_UTF8, 0, g_editLogin, -1, std::back_inserter(g_slots[slot].user), 64);
+                g_slots[slot].passBlob = DpapiProtect(g_editPassW);
+                AccountsSave();
+                g_selectedSlot = slot;
+                Logf("Conta salva no slot %d: %s", slot + 1, g_editLogin);
+            }
+        }
+
+        ImGui::SameLine();
+
+        // Botão EXIT
+        if (ImGui::Button("  EXIT  ", ImVec2(btnLargura, 45))) {
+            // Fecha painel
+            // (não fecha o jogo, só limpa seleção)
+            g_selectedSlot = -1;
+            memset(g_editLogin, 0, sizeof(g_editLogin));
+            g_editPassW.clear();
+        }
+
         ImGui::End();
     }
 }
