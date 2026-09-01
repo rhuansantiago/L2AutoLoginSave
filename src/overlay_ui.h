@@ -37,3 +37,5 @@ LoginCoords&  CoordsGet();
 
 // Install the D3D9 EndScene/Reset hooks (called from DllMain ATTACH).
 void OverlayInstall();
+// Draw the overlay UI (called from d3d9_hook.cpp's hkEndScene hook)
+void BuildOverlayUI();
