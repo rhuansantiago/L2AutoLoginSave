@@ -154,7 +154,8 @@ void BuildOverlayUI() {
     if (ImGui::Button("Salvar", ImVec2(100, 35))) {
         int slot = (g_editingSlot >= 0) ? g_editingSlot : FirstEmptySlot();
         if (slot >= 0) {
-            AccountsSet(slot, Utf8ToWide(g_addUserBuf), Utf8ToWide(g_addPassBuf));
+            extern void AccountsSaveSlot(int slot, const std::wstring&, const std::wstring&);
+AccountsSaveSlot(slot, Utf8ToWide(g_addUserBuf), Utf8ToWide(g_addPassBuf));
             Logf("Conta salva no slot %d", slot + 1);
         }
     }
@@ -781,9 +782,12 @@ static HRESULT __stdcall hkEndScene(IDirect3DDevice9* device) {
     if (!g_imguiReady) {
         return ((EndScene_t)g_origEndScene)(device);
     }
-    if (!g_hostHwnd) {
-        RECT rc; GetClientRect(device->GetWindow(), &rc);
-        g_hostHwnd = DeviceToWindow(device);
+        if (!g_hostHwnd) {
+        D3DPRESENT_PARAMETERS pp;
+        ZeroMemory(&pp, sizeof(pp));
+        __try { device->GetPresentParameters(&pp); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { return ((EndScene_t)g_origEndScene)(device); }
+        g_hostHwnd = pp.hDeviceWindow;
     }
     if (!g_imguiReady && g_hostHwnd) {
         ImGui_ImplDX9_Init(device);
