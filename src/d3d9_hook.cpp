@@ -803,8 +803,6 @@ static HRESULT __stdcall hkEndScene(IDirect3DDevice9* device) {
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
     return ((EndScene_t)g_origEndScene)(device);
 }
-        Logf("ImGui pronto — janela do L2 capturada");
-    }
 
 static HRESULT __stdcall hkReset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     if (g_imguiReady) {
