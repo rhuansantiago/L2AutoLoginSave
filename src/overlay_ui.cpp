@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include "overlay_ui.h"
+#include <imgui.h>
 
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "shell32.lib")
