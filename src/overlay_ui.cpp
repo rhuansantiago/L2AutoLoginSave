@@ -1,27 +1,22 @@
 // Phase 2.5 — Account data model + DPAPI storage. The actual UI lives in
 // d3d9_hook.cpp now (ImGui rendered inside L2's framebuffer); this file
 // is the data layer that the hook calls into.
-
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wincrypt.h>
 #include <shlobj.h>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include "overlay_ui.h"
 #include <imgui.h>
-
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "shell32.lib")
-
 extern "C" void Logf(const char* fmt, ...);
 extern void D3D9HookInstall();    // d3d9_hook.cpp
-
 namespace {
-
 Account g_slots[kNumSlots];
 LoginCoords g_coords;
-
 // FNV-1a 32-bit over the path lowercased per wchar_t — Windows file paths
 // are case-insensitive, so case shouldn't change the scope identity.
 uint32_t Fnv1aW_LowerCase(const wchar_t* s) {
@@ -33,7 +28,6 @@ uint32_t Fnv1aW_LowerCase(const wchar_t* s) {
     }
     return h;
 }
-
 // Per-install scope dir: %APPDATA%\hollow_l2_overlay\<hash8> where hash8 is
 // FNV-1a of the System folder (parent of L2.exe). Two installs (different
 // folders, different chronicle, different server) get distinct account
@@ -46,25 +40,20 @@ uint32_t Fnv1aW_LowerCase(const wchar_t* s) {
 std::wstring GetScopeDir() {
     static std::wstring s_cached;
     if (!s_cached.empty()) return s_cached;
-
     wchar_t appdata[MAX_PATH] = {0};
     SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata);
     std::wstring base = appdata;
     base += L"\\hollow_l2_overlay";
     CreateDirectoryW(base.c_str(), nullptr);
-
     wchar_t exePath[MAX_PATH] = {0};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-
     // System folder = dirname(exePath).
     std::wstring sysDir = exePath;
     size_t lastBs = sysDir.find_last_of(L'\\');
     if (lastBs != std::wstring::npos) sysDir.resize(lastBs);
-
     wchar_t scope[16];
     swprintf(scope, 16, L"%08x", Fnv1aW_LowerCase(sysDir.c_str()));
     std::wstring full = base + L"\\" + scope;
-
     // One-shot migration from legacy L2.exe-path scope name.
     if (GetFileAttributesW(full.c_str()) == INVALID_FILE_ATTRIBUTES) {
         wchar_t legacyScope[16];
@@ -77,9 +66,7 @@ std::wstring GetScopeDir() {
             }
         }
     }
-
     CreateDirectoryW(full.c_str(), nullptr);
-
     // Drop an info.txt the first time we create the scope dir. CREATE_NEW =
     // no overwrite on subsequent runs (preserves info from earlier scope).
     std::wstring info = full + L"\\info.txt";
@@ -98,31 +85,25 @@ std::wstring GetScopeDir() {
     Logf("Storage scope: %ls", full.c_str());
     return s_cached;
 }
-
 std::wstring GetStoragePath() { return GetScopeDir() + L"\\accounts.dat"; }
 std::wstring GetCoordsPath()  { return GetScopeDir() + L"\\coords.dat";   }
-
 // Migration helper: if the per-scope file doesn't exist but the legacy
 // global one (from before per-install scoping) does, copy it across so
 // users don't lose their saved accounts on upgrade.
 void MigrateLegacyIfNeeded(const wchar_t* leafName) {
     std::wstring newPath = GetScopeDir() + L"\\" + leafName;
     if (GetFileAttributesW(newPath.c_str()) != INVALID_FILE_ATTRIBUTES) return;
-
     wchar_t appdata[MAX_PATH] = {0};
     SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata);
     std::wstring legacy = appdata;
     legacy += L"\\hollow_l2_overlay\\";
     legacy += leafName;
     if (GetFileAttributesW(legacy.c_str()) == INVALID_FILE_ATTRIBUTES) return;
-
     if (CopyFileW(legacy.c_str(), newPath.c_str(), TRUE)) {
         Logf("Migrated legacy %ls into scope dir", leafName);
     }
 }
-
 }  // namespace
-
 std::vector<BYTE> DpapiProtect(const std::wstring& plaintext) {
     DATA_BLOB in = { (DWORD)(plaintext.size() * sizeof(wchar_t)),
                      (BYTE*)plaintext.data() };
@@ -136,7 +117,6 @@ std::vector<BYTE> DpapiProtect(const std::wstring& plaintext) {
     }
     return result;
 }
-
 std::wstring DpapiUnprotect(const std::vector<BYTE>& blob) {
     if (blob.empty()) return L"";
     DATA_BLOB in = { (DWORD)blob.size(), (BYTE*)blob.data() };
@@ -150,7 +130,6 @@ std::wstring DpapiUnprotect(const std::vector<BYTE>& blob) {
     }
     return result;
 }
-
 void AccountsLoad() {
     MigrateLegacyIfNeeded(L"accounts.dat");
     std::wstring path = GetStoragePath();
@@ -205,7 +184,6 @@ void AccountsLoad() {
     if (purged > 0) AccountsSave();  // persist the cleanup
     Logf("AccountsLoad: loaded %d slots (%d purged)", populated, purged);
 }
-
 void AccountsSave() {
     std::wstring path = GetStoragePath();
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
@@ -226,15 +204,12 @@ void AccountsSave() {
     CloseHandle(h);
     Logf("AccountsSave: wrote %ls", path.c_str());
 }
-
 Account& AccountsGet(int slot) {
     static Account dummy;
     if (slot < 0 || slot >= kNumSlots) return dummy;
     return g_slots[slot];
 }
-
 LoginCoords& CoordsGet() { return g_coords; }
-
 void CoordsLoad() {
     MigrateLegacyIfNeeded(L"coords.dat");
     HANDLE h = CreateFileW(GetCoordsPath().c_str(), GENERIC_READ, FILE_SHARE_READ,
@@ -254,7 +229,6 @@ void CoordsLoad() {
         Logf("CoordsLoad: bad magic or short read (%lu bytes)", rd);
     }
 }
-
 void CoordsSave() {
     HANDLE h = CreateFileW(GetCoordsPath().c_str(), GENERIC_WRITE, 0, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -269,7 +243,6 @@ void CoordsSave() {
     Logf("CoordsSave: ID=(%ld,%ld) PASS=(%ld,%ld)",
          rec.idX, rec.idY, rec.passX, rec.passY);
 }
-
 // Heavy init runs on a worker thread to avoid loader-lock issues. Direct3D
 // device creation in particular pulls in COM init + driver DLLs and was
 // causing L2.exe to fail startup with STATUS_DLL_INIT_FAILED (0xC0000142)
@@ -279,7 +252,6 @@ void CoordsSave() {
 // family this is mandatory: UNetworkHandler::Init runs during engine
 // startup and we must hook it before that fires to capture the singleton.
 void EnsureClientHooksPublic();
-
 static DWORD WINAPI InstallWorker(LPVOID /*lpv*/) {
     Logf("InstallWorker: started");
     // Try installing client hooks (Engine.dll for Interlude, NWindow.dll
@@ -288,7 +260,6 @@ static DWORD WINAPI InstallWorker(LPVOID /*lpv*/) {
     // catch the singleton. NWindow.dll may not be loaded yet (lazy load)
     // — EnsureClientHooks bails gracefully and is retried from RenderFrame.
     EnsureClientHooksPublic();
-
     Logf("InstallWorker: sleeping 2s for L2 init to settle (for D3D9 hooks)...");
     Sleep(2000);
     AccountsLoad();
@@ -297,7 +268,6 @@ static DWORD WINAPI InstallWorker(LPVOID /*lpv*/) {
     Logf("InstallWorker: install complete");
     return 0;
 }
-
 // Public install entry called by DllMain. Singleton-guards itself and
 // spawns InstallWorker to do the actual install AFTER DllMain returns
 // (loader lock released by then).
@@ -325,54 +295,41 @@ void OverlayInstall() {
     }
 }
 // =========================================================================
-//             NOVA INTERFACE — Estilo Interlude Dourado
+//             NOVA INTERFACE — Estilo Interlude Dourado — CORRIGIDO
 // =========================================================================
 
-static int   g_selectedSlot = -1;
-static bool  g_showPassword = false;
-static bool  g_autoLogin = false;
-static char  g_editLogin[64] = "";
-static wchar_t g_editPassW[128] = L"";
+static int          g_selectedSlot = -1;
+static bool         g_showPassword = false;
+static bool         g_autoLogin = false;
+static char         g_editLogin[64] = "";
+static std::wstring g_editPassW;
 
 void BuildOverlayUI() {
-    // === ESTILO — Tema dourado igual a imagem ===
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 12.0f;
     style.FrameRounding = 6.0f;
     style.Colors[ImGuiCol_WindowBg]        = ImVec4(0.06f, 0.08f, 0.15f, 0.96f);
     style.Colors[ImGuiCol_Border]          = ImVec4(0.85f, 0.70f, 0.20f, 1.00f);
-    style.Colors[ImGuiCol_BorderShadow]    = ImVec4(0.40f, 0.30f, 0.10f, 0.50f);
     style.Colors[ImGuiCol_TitleBg]         = ImVec4(0.10f, 0.08f, 0.05f, 1.00f);
     style.Colors[ImGuiCol_TitleBgActive]   = ImVec4(0.15f, 0.12f, 0.08f, 1.00f);
-    style.Colors[ImGuiCol_TitleText]       = ImVec4(1.00f, 0.85f, 0.30f, 1.00f);
+    style.Colors[ImGuiCol_Text]            = ImVec4(0.95f, 0.90f, 0.80f, 1.00f);
     style.Colors[ImGuiCol_FrameBg]         = ImVec4(0.12f, 0.15f, 0.22f, 1.00f);
     style.Colors[ImGuiCol_FrameBgHovered]  = ImVec4(0.18f, 0.20f, 0.30f, 1.00f);
-    style.Colors[ImGuiCol_FrameBgActive]   = ImVec4(0.08f, 0.10f, 0.18f, 1.00f);
-    style.Colors[ImGuiCol_Button]          = ImVec4(0.20f, 0.35f, 0.60f, 1.00f);
-    style.Colors[ImGuiCol_ButtonHovered]   = ImVec4(0.30f, 0.50f, 0.85f, 1.00f);
-    style.Colors[ImGuiCol_ButtonActive]    = ImVec4(0.15f, 0.25f, 0.45f, 1.00f);
     style.Colors[ImGuiCol_Button]          = ImVec4(0.22f, 0.38f, 0.65f, 1.00f);
     style.Colors[ImGuiCol_ButtonHovered]   = ImVec4(0.35f, 0.55f, 0.90f, 1.00f);
     style.Colors[ImGuiCol_ButtonActive]    = ImVec4(0.12f, 0.22f, 0.42f, 1.00f);
-    style.Colors[ImGuiCol_Text]            = ImVec4(0.95f, 0.90f, 0.80f, 1.00f);
-    style.Colors[ImGuiCol_TextSelectedBg]  = ImVec4(0.85f, 0.70f, 0.20f, 0.35f);
     style.Colors[ImGuiCol_CheckMark]       = ImVec4(1.00f, 0.85f, 0.30f, 1.00f);
 
-    // === TAMANHO E POSIÇÃO ===
     ImGui::SetNextWindowPos(ImVec2(100, 80), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(420, 460), ImGuiCond_FirstUseEver);
 
-    // === JANELA PRINCIPAL ===
     if (ImGui::Begin("AUTO LOGIN", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) {
-
-        // Título centralizado dourado
         float tw = ImGui::CalcTextSize("AUTO LOGIN").x;
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - tw) * 0.5f);
         ImGui::TextColored(ImVec4(1.00f, 0.85f, 0.30f, 1.00f), "AUTO LOGIN");
         ImGui::Separator();
         ImGui::Spacing();
 
-        // === LISTA DE CONTAS SALVAS ===
         ImGui::Text("Contas salvas:");
         ImGui::BeginChild("ListaContas", ImVec2(-1, 160), true);
         for (int i = 0; i < kNumSlots; i++) {
@@ -382,17 +339,13 @@ void BuildOverlayUI() {
             char label[128];
             snprintf(label, sizeof(label), "%d. %ls", i + 1, acc.user.c_str());
 
-            // Clique simples = preenche campos
             if (ImGui::Selectable(label, g_selectedSlot == i)) {
                 g_selectedSlot = i;
-                // Preenche login
-                WideCharToMultiByte(CP_UTF8, 0, acc.user.c_str(), -1, g_editLogin, sizeof(g_editLogin), nullptr, nullptr);
-                // Descriptografa senha pro campo de edição
+                WideCharToMultiByte(CP_UTF8, 0, acc.user.c_str(), -1, g_editLogin, sizeof(g_editLogin), NULL, NULL);
                 g_editPassW = DpapiUnprotect(acc.passBlob);
                 g_showPassword = false;
             }
 
-            // Botão EXCLUIR (X)
             ImGui::SameLine(ImGui::GetWindowWidth() - 40);
             char btnDel[16];
             snprintf(btnDel, sizeof(btnDel), "X##del%d", i);
@@ -409,50 +362,47 @@ void BuildOverlayUI() {
         ImGui::EndChild();
         ImGui::Spacing(); ImGui::Spacing();
 
-        // === CAMPO LOGIN ===
         ImGui::Text(" 👤"); ImGui::SameLine();
         ImGui::SetNextItemWidth(320);
-        if (ImGui::InputText("##login", g_editLogin, sizeof(g_editLogin))) {
-            // Campo editado
-        }
+        ImGui::InputText("##login", g_editLogin, sizeof(g_editLogin));
         ImGui::Spacing();
 
-        // === CAMPO SENHA ===
         ImGui::Text(" 🔒"); ImGui::SameLine();
         ImGui::SetNextItemWidth(270);
-        static char passShow[128] = "";
+        static char passBuf[128] = "";
+
         if (g_showPassword) {
-            // Mostra senha em texto
-            WideCharToMultiByte(CP_UTF8, 0, g_editPassW.c_str(), -1, passShow, sizeof(passShow), nullptr, nullptr);
-            if (ImGui::InputText("##senha_show", passShow, sizeof(passShow))) {
-                MultiByteToWideChar(CP_UTF8, 0, passShow, -1, &g_editPassW[0], (int)g_editPassW.size() + 1);
+            WideCharToMultiByte(CP_UTF8, 0, g_editPassW.c_str(), -1, passBuf, sizeof(passBuf), NULL, NULL);
+            if (ImGui::InputText("##senha_texto", passBuf, sizeof(passBuf))) {
+                g_editPassW.clear();
+                int need = MultiByteToWideChar(CP_UTF8, 0, passBuf, -1, NULL, 0);
+                if (need > 0) {
+                    g_editPassW.resize(need - 1);
+                    MultiByteToWideChar(CP_UTF8, 0, passBuf, -1, &g_editPassW[0], need);
+                }
             }
         } else {
-            // Senha mascarada
-            static char passMask[128] = "";
-            memset(passMask, 0, sizeof(passMask));
-            for (size_t j = 0; j < g_editPassW.size() && j < 64; j++) passMask[j] = '*';
-            ImGui::InputText("##senha_mask", passMask, sizeof(passMask), ImGuiInputTextFlags_Password);
+            memset(passBuf, 0, sizeof(passBuf));
+            size_t len = g_editPassW.size();
+            if (len >= sizeof(passBuf)) len = sizeof(passBuf) - 1;
+            for (size_t j = 0; j < len; j++) passBuf[j] = '*';
+            ImGui::InputText("##senha_mascarada", passBuf, sizeof(passBuf), ImGuiInputTextFlags_Password);
         }
-        // Botão OLHINHO mostrar/esconder senha
+
         ImGui::SameLine();
         if (ImGui::Button(g_showPassword ? " 🙈" : " 👁️")) {
             g_showPassword = !g_showPassword;
         }
         ImGui::Spacing(); ImGui::Spacing();
 
-        // === CHECKBOX: Entrar automaticamente ===
         ImGui::SetCursorPosX(40);
         ImGui::Checkbox(" Entrar automaticamente", &g_autoLogin);
         ImGui::Spacing(); ImGui::Spacing();
 
-        // === BOTÕES: LOG IN e EXIT ===
         float btnLargura = 170.0f;
         ImGui::SetCursorPosX(30);
 
-        // Botão SALVAR / LOG IN
         if (ImGui::Button("  LOG IN  ", ImVec2(btnLargura, 45))) {
-            // Procurar slot vazio ou usar o selecionado
             int slot = g_selectedSlot;
             if (slot < 0) {
                 for (int i = 0; i < kNumSlots; i++) {
@@ -460,9 +410,12 @@ void BuildOverlayUI() {
                 }
             }
             if (slot >= 0 && slot < kNumSlots && g_editLogin[0]) {
-                // Salva conta
                 g_slots[slot].user.clear();
-                MultiByteToWideChar(CP_UTF8, 0, g_editLogin, -1, std::back_inserter(g_slots[slot].user), 64);
+                int need = MultiByteToWideChar(CP_UTF8, 0, g_editLogin, -1, NULL, 0);
+                if (need > 0) {
+                    g_slots[slot].user.resize(need - 1);
+                    MultiByteToWideChar(CP_UTF8, 0, g_editLogin, -1, &g_slots[slot].user[0], need);
+                }
                 g_slots[slot].passBlob = DpapiProtect(g_editPassW);
                 AccountsSave();
                 g_selectedSlot = slot;
@@ -471,11 +424,7 @@ void BuildOverlayUI() {
         }
 
         ImGui::SameLine();
-
-        // Botão EXIT
         if (ImGui::Button("  EXIT  ", ImVec2(btnLargura, 45))) {
-            // Fecha painel
-            // (não fecha o jogo, só limpa seleção)
             g_selectedSlot = -1;
             memset(g_editLogin, 0, sizeof(g_editLogin));
             g_editPassW.clear();
