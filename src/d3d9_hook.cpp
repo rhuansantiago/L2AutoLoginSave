@@ -780,5 +780,57 @@ static void PollPlayerExtras() {
                 Logf("Class changed: %d -> %d", g_currentClassId, classId);
                 g_currentClassId = classId;
                 const wchar_t* name = GetClassNameById(classId);
-                if (name) {
-                   }
+                            if (name) {
+                int cn = SafeMeasureWideLen(name, 63);
+                memcpy(g_currentPlayerClass, name, cn * sizeof(wchar_t));
+                g_currentPlayerClass[cn] = 0;
+            } else {
+                _snwprintf_s(g_currentPlayerClass, _countof(g_currentPlayerClass),
+                             _TRUNCATE, L"Cls.%d", classId);
+            }
+            changed = true;
+        }
+    }
+    if (changed) {
+        SetWindowTitleWithPlayer();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Hook install / uninstall
+// -----------------------------------------------------------------------------
+static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+        return true;
+    return CallWindowProcW(g_origWndProc, hWnd, msg, wParam, lParam);
+}
+
+static HRESULT __stdcall hkEndScene(IDirect3DDevice9* device) {
+    if (!g_imguiReady) {
+        return ((EndScene_t)g_origEndScene)(device);
+    }
+    ImGui_ImplDX9_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    BuildOverlayUI();
+    ImGui::Render();
+    ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+    return ((EndScene_t)g_origEndScene)(device);
+}
+
+static HRESULT __stdcall hkReset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
+    if (g_imguiReady) {
+        ImGui_ImplDX9_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+    }
+    HRESULT hr = ((Reset_t)g_origReset)(device, pp);
+    if (g_imguiReady && SUCCEEDED(hr)) {
+        ImGui_ImplDX9_Init(device);
+        ImGui_ImplWin32_Init(g_hostHwnd);
+    }
+    return hr;
+}
+
+// ... (restante das funções de hook e instalação)
+
+} // namespace
