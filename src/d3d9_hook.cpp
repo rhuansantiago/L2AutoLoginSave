@@ -781,4 +781,4 @@ static void PollPlayerExtras() {
                 g_currentClassId = classId;
                 const wchar_t* name = GetClassNameById(classId);
                 if (name) {
-                   
+                   }
