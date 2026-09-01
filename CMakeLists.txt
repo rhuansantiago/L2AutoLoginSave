@@ -70,4 +70,4 @@ if(MSVC)
     set_target_properties(l2ui PROPERTIES
         LINK_FLAGS "/GUARD:NO /MAP /DEBUG /OPT:REF /OPT:ICF"
     )
-endif()
+endif(
