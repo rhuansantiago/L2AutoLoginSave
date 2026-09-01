@@ -323,3 +323,21 @@ void OverlayInstall() {
         Logf("OverlayInstall: CreateThread failed err=%lu", GetLastError());
     }
 }
+void BuildOverlayUI() {
+    // Set ImGui window properties
+    ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
+    
+    if (ImGui::Begin("L2 Account Manager", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        // Add your ImGui UI code here
+        // Example: account selection, login button, etc.
+        ImGui::Text("Account slots:");
+        for (int i = 0; i < kNumSlots; i++) {
+            Account& acc = AccountsGet(i);
+            if (!acc.empty()) {
+                ImGui::BulletText("Slot %d: %ls", i + 1, acc.user.c_str());
+            }
+        }
+        ImGui::End();
+    }
+}
