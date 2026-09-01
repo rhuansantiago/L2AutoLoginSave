@@ -750,8 +750,8 @@ static void EnumerateInterludeUsers() {
 // crash us if the engine recycled the object between polls.
 static void PollPlayerExtras() {
     if (!g_localUser || !g_profile) return;
-    if (g_currentPlayerName[0] == 0) return;   // not in-world yet
-    if (g_extrasDelayFrames > 0) return;       // initial fetch still pending
+    if (g_currentPlayerName[0] == 0) return;
+    if (g_extrasDelayFrames > 0) return;
     bool changed = false;
     // Level re-read (direct memory access at the cached offset).
     if (g_guessedLevelOffset > 0) {
@@ -780,22 +780,22 @@ static void PollPlayerExtras() {
                 Logf("Class changed: %d -> %d", g_currentClassId, classId);
                 g_currentClassId = classId;
                 const wchar_t* name = GetClassNameById(classId);
-                            if (name) {
-                int cn = SafeMeasureWideLen(name, 63);
-                memcpy(g_currentPlayerClass, name, cn * sizeof(wchar_t));
-                g_currentPlayerClass[cn] = 0;
-            } else {
-                _snwprintf_s(g_currentPlayerClass, _countof(g_currentPlayerClass),
-                             _TRUNCATE, L"Cls.%d", classId);
-            }
-            changed = true;
+                if (name) {
+                    int cn = SafeMeasureWideLen(name, 63);
+                    memcpy(g_currentPlayerClass, name, cn * sizeof(wchar_t));
+                    g_currentPlayerClass[cn] = 0;
+                } else {
+                    _snwprintf_s(g_currentPlayerClass, _countof(g_currentPlayerClass),
+                                 _TRUNCATE, L"Cls.%d", classId);
+                }
+                changed = true;
+            }  // ← ADD THIS CLOSING BRACE
         }
     }
     if (changed) {
         SetWindowTitleWithPlayer();
     }
 }
-
 // -----------------------------------------------------------------------------
 // Hook install / uninstall
 // -----------------------------------------------------------------------------
