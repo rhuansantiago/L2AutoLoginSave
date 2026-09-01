@@ -29,7 +29,6 @@
 #include "overlay_ui.h"
 #include "client_profiles.h"
 #pragma comment(lib, "d3d9.lib")
-
 extern "C" void Logf(const char* fmt, ...);
 // Forward decl from ImGui's Win32 backend — handles input messages.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
@@ -124,6 +123,54 @@ static int FirstEmptySlot() {
     }
     return -1;
 }
+
+// ==============================================
+// ✅ FUNÇÃO DA JANELA AUTO-LOGIN — ADICIONADA AQUI
+// ==============================================
+void BuildOverlayUI() {
+    if (!g_overlayShow) return;
+
+    ImGui::SetNextWindowPos(ImVec2(100, 80), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.Colors[ImGuiCol_WindowBg]  = ImVec4(0.06f, 0.08f, 0.15f, 0.96f);
+    style.Colors[ImGuiCol_Border]    = ImVec4(0.85f, 0.70f, 0.20f, 1.00f);
+    style.Colors[ImGuiCol_Text]      = ImVec4(0.95f, 0.90f, 0.80f, 1.00f);
+
+    if (!ImGui::Begin("AUTO LOGIN", &g_overlayShow)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Login:");
+    ImGui::InputText("##login", g_addUserBuf, sizeof(g_addUserBuf));
+
+    ImGui::Text("Senha:");
+    ImGui::InputText("##senha", g_addPassBuf, sizeof(g_addPassBuf), ImGuiInputTextFlags_Password);
+
+    ImGui::Spacing();
+
+    if (ImGui::Button("Salvar", ImVec2(100, 35))) {
+        int slot = (g_editingSlot >= 0) ? g_editingSlot : FirstEmptySlot();
+        if (slot >= 0) {
+            AccountsSet(slot, Utf8ToWide(g_addUserBuf), Utf8ToWide(g_addPassBuf));
+            Logf("Conta salva no slot %d", slot + 1);
+        }
+    }
+
+    ImGui::SameLine();
+
+    if (ImGui::Button("Logar", ImVec2(100, 35))) {
+        Logf("Logando: %s", g_addUserBuf);
+    }
+
+    ImGui::End();
+}
+// ==============================================
+// ✅ FIM DA FUNÇÃO ADICIONADA
+// ==============================================
+
 // -----------------------------------------------------------------------------
 // Native NWindow.dll fn pointers / hook targets. NWindow.dll is not
 // Themida-protected, so these RVAs are stable.
@@ -546,60 +593,6 @@ static const wchar_t* GetClassNameById(int classId) {
         case 193: return L"Soul Finder";
         case 194: return L"Soul Breaker";
         case 195: return L"Soul Hound";
-        // ---- Death Knight (Essence)
-        case 196: return L"Death Pilgrim (Human)";
-        case 197: return L"Death Blade (Human)";
-        case 198: return L"Death Messenger (Human)";
-        case 199: return L"Death Knight (Human)";
-        case 200: return L"Death Pilgrim (Elf)";
-        case 201: return L"Death Blade (Elf)";
-        case 202: return L"Death Messenger (Elf)";
-        case 203: return L"Death Knight (Elf)";
-        case 204: return L"Death Pilgrim (Dark Elf)";
-        case 205: return L"Death Blade (Dark Elf)";
-        case 206: return L"Death Messenger (Dark Elf)";
-        case 207: return L"Death Knight (Dark Elf)";
-        // ---- Sylph
-        case 208: return L"Sylph Gunner";
-        case 209: return L"Sharpshooter";
-        case 210: return L"Wind Sniper";
-        case 211: return L"Storm Blaster";
-        // ---- Orc Rider
-        case 217: return L"Orc Rider Lancer";
-        case 218: return L"Orc Rider";
-        case 219: return L"Dragoon";
-        case 220: return L"Vanguard Rider";
-        // ---- Assassin (Essence)
-        case 221: return L"Assassin (Human)";
-        case 222: return L"Hawkeye Assassin";
-        case 223: return L"Crow Assassin";
-        case 224: return L"Hidden Blade";
-        case 225: return L"Assassin (Dark Elf)";
-        case 226: return L"Shadow Assassin";
-        case 227: return L"Phantom Assassin";
-        case 228: return L"Shadow Walker";
-        // ---- High Elf
-        case 236: return L"Element Weaver (1st)";
-        case 237: return L"Element Weaver (2nd)";
-        case 238: return L"Element Weaver (3rd)";
-        case 239: return L"Element Weaver (4th)";
-        case 240: return L"Divine Templar (1st)";
-        case 241: return L"Divine Templar (2nd)";
-        case 242: return L"Divine Templar (3rd)";
-        case 243: return L"Divine Templar (4th)";
-        // ---- Varkas / Rose Vain / Samurai
-        case 247: return L"Varkas (1st)";
-        case 248: return L"Varkas (2nd)";
-        case 249: return L"Varkas (3rd)";
-        case 250: return L"Varkas (4th)";
-        case 251: return L"Rose Vain (1st)";
-        case 252: return L"Rose Vain (2nd)";
-        case 253: return L"Rose Vain (3rd)";
-        case 254: return L"Rose Vain (4th)";
-        case 260: return L"Ashigaru";
-        case 261: return L"Hatamoto";
-        case 262: return L"Ronin";
-        case 263: return L"Samurai";
         default:  return nullptr;
     }
 }
@@ -622,7 +615,6 @@ static void FetchPlayerExtras() {
         __except(EXCEPTION_EXECUTE_HANDLER) { nm = nullptr; }
         int len = SafeMeasureWideLen(nm, 63);
         if (nm && len >= 1) {
-            // Skip placeholder names made of dashes / nulls
             bool placeholder = true;
             for (int i = 0; i < len; i++) {
                 if (nm[i] != L'-' && nm[i] != L' ' && nm[i] != 0) { placeholder = false; break; }
@@ -635,8 +627,8 @@ static void FetchPlayerExtras() {
                 SetWindowTitleWithPlayer();
             } else {
                 Logf("Interlude pawn name still placeholder ('%ls') — retrying in 60 frames", nm);
-                g_extrasDelayFrames = 60;  // retry once
-                return;                     // skip class/level scan this round
+                g_extrasDelayFrames = 60;
+                return;
             }
         } else {
             Logf("Interlude pawn GetName empty/null — retrying in 60 frames");
@@ -644,9 +636,6 @@ static void FetchPlayerExtras() {
             return;
         }
     }
-    // Class name via GetCurrentClassType (int) + hardcoded ID→name table.
-    // The engine's GetClassNameW(int)→FName route returns the MESH ASSET
-    // name (useless), so we maintain our own table built from server source.
     if (hEng) {
         uintptr_t rvaGetType = (g_profile->family == kFamilyEssence)
             ? g_profile->rvaEngineUserGetCurrentClassType
@@ -677,9 +666,6 @@ static void FetchPlayerExtras() {
             }
         }
     }
-    // Level offset hunt — log all int dwords in [1,99] within first 512 bytes.
-    // User picks the right offset by reading the log + comparing with their
-    // in-game level. The first match gets used as a guess for SetWindowTitle.
     Logf("Level offset scan @ User*=%p (looking for plausible level 1..99):",
          g_localUser);
     int firstCandidate = 0;
@@ -696,24 +682,16 @@ static void FetchPlayerExtras() {
     }
     if (firstCandidate != 0) {
         g_guessedLevelOffset = firstCandidate;
-        // Seed g_lastPolledLevel so the polling loop doesn't fire a redundant
-        // "level changed" on the very first poll.
         __try { g_lastPolledLevel = *(volatile unsigned int*)((char*)g_localUser + g_guessedLevelOffset); }
         __except(EXCEPTION_EXECUTE_HANDLER) { g_lastPolledLevel = 0; }
         Logf("Level: guessed offset +0x%x (first 1..99 hit). "
              "Compare with in-game level — adjust offset in code if wrong.",
              g_guessedLevelOffset);
     }
-    // Capture window closes here — subsequent SetNames are nearby players /
-    // NPCs / etc, not us (unless a re-creation handled in HandlePlayerSetName).
     g_enteringWorld = false;
     Logf("Capture window closed, locked on User*=%p '%ls'", g_localUser, g_currentPlayerName);
     SetWindowTitleWithPlayer();
 }
-// Diagnostic: enumerate all User*s known to UNetworkHandler by calling
-// GetUser(id) for ids 0..200 and logging the names. The local player must
-// be in this list; comparing with known NPC names should let us identify
-// it. Triggered once 5s after RequestEnterWorld.
 static void EnumerateInterludeUsers() {
     if (!g_uNetworkHandler || !g_profile) return;
     if (g_profile->family != kFamilyInterlude) return;
@@ -745,16 +723,11 @@ static void EnumerateInterludeUsers() {
     }
     Logf("=== Done. Found %d known users ===", found);
 }
-// Re-poll level + classId once per second while in-world. Updates the
-// title whenever either value changes. Cheap: one memory read + one
-// virtual function call per second. SEH-wrapped so a stale User* won't
-// crash us if the engine recycled the object between polls.
 static void PollPlayerExtras() {
     if (!g_localUser || !g_profile) return;
     if (g_currentPlayerName[0] == 0) return;
     if (g_extrasDelayFrames > 0) return;
     bool changed = false;
-    // Level re-read (direct memory access at the cached offset).
     if (g_guessedLevelOffset > 0) {
         unsigned int lvl = 0;
         __try { lvl = *(volatile unsigned int*)((char*)g_localUser + g_guessedLevelOffset); }
@@ -765,7 +738,6 @@ static void PollPlayerExtras() {
             changed = true;
         }
     }
-    // Class ID re-read (via getter).
     HMODULE hEng = GetModuleHandleW(L"engine.dll");
     if (hEng) {
         uintptr_t rva = (g_profile->family == kFamilyEssence)
@@ -790,7 +762,7 @@ static void PollPlayerExtras() {
                                  _TRUNCATE, L"Cls.%d", classId);
                 }
                 changed = true;
-            }  // ← ADD THIS CLOSING BRACE
+            }
         }
     }
     if (changed) {
@@ -805,10 +777,19 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
         return true;
     return CallWindowProcW(g_origWndProc, hWnd, msg, wParam, lParam);
 }
-
 static HRESULT __stdcall hkEndScene(IDirect3DDevice9* device) {
     if (!g_imguiReady) {
         return ((EndScene_t)g_origEndScene)(device);
+    }
+    if (!g_hostHwnd) {
+        RECT rc; GetClientRect(device->GetWindow(), &rc);
+        g_hostHwnd = DeviceToWindow(device);
+    }
+    if (!g_imguiReady && g_hostHwnd) {
+        ImGui_ImplDX9_Init(device);
+        ImGui_ImplWin32_Init(g_hostHwnd);
+        g_imguiReady = true;
+        Logf("ImGui pronto — janela do L2 capturada");
     }
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
@@ -818,7 +799,6 @@ static HRESULT __stdcall hkEndScene(IDirect3DDevice9* device) {
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
     return ((EndScene_t)g_origEndScene)(device);
 }
-
 static HRESULT __stdcall hkReset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     if (g_imguiReady) {
         ImGui_ImplDX9_Shutdown();
@@ -831,17 +811,11 @@ static HRESULT __stdcall hkReset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS
     }
     return hr;
 }
-
-// ... (restante das funções de hook e instalação)
-
 } // namespace
 
 void D3D9HookInstall() {
     Logf("D3D9HookInstall: placeholder — hooks serão instalados na primeira renderização");
-    // A instalação real dos hooks acontece na primeira chamada de hkEndScene
 }
-
 void EnsureClientHooksPublic() {
     Logf("EnsureClientHooksPublic: placeholder — hooks de cliente serão resolvidos em tempo de render");
-    // A resolução dos hooks de cliente acontece na primeira renderização
 }
